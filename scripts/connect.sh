@@ -77,7 +77,9 @@ wait_for_proxy() {
     while [[ $attempt -lt $max_attempts ]]; do
         if nc -z 127.0.0.1 8889 2>/dev/null; then
             log_ok "SOCKS5 proxy is ready on localhost:8889"
-            log_ok "HTTP proxy is ready on localhost:8888"
+            if nc -z 127.0.0.1 8888 2>/dev/null; then
+                log_ok "HTTP proxy is ready on localhost:8888"
+            fi
             return 0
         fi
 
