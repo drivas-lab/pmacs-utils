@@ -1,0 +1,20 @@
+# Credentials - NEVER commit
+.env
+
+# Editor/IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+logs/
+
+# Local overrides
+docker-compose.override.yml
