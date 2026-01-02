@@ -17,20 +17,29 @@ After installation:
 3. Wait for Docker to fully start (menu bar icon stops animating)
 4. Verify: `docker --version`
 
-### 2. Install netcat (GNU version)
+### 2. Install a SOCKS-capable netcat
 
-macOS includes BSD netcat, but we need GNU netcat for the `-x` (proxy) option:
+macOS includes BSD netcat, but it lacks the `-x` (proxy) option. You have two options:
 
-```bash
-brew install netcat
-```
-
-This installs GNU netcat. The `nc` command will use it automatically.
-
-**Alternative:** Use ncat from nmap:
+**Option A: ncat from nmap (recommended)**
 ```bash
 brew install nmap
 ```
+Then use this ProxyCommand in SSH config:
+```
+ProxyCommand ncat --proxy 127.0.0.1:8889 --proxy-type socks5 %h %p
+```
+
+**Option B: GNU netcat**
+```bash
+brew install netcat
+```
+GNU netcat is keg-only, so add it to your PATH in `~/.zshrc`:
+```bash
+export PATH="/opt/homebrew/opt/netcat/bin:$PATH"  # Apple Silicon
+# or: export PATH="/usr/local/opt/netcat/bin:$PATH"  # Intel Mac
+```
+Then reload: `source ~/.zshrc`
 
 ## Installation
 
@@ -49,17 +58,18 @@ nano .env
 
 ## SSH Configuration
 
-### Automatic Setup
+### Automatic Setup (recommended)
 
 ```bash
 ./ssh/setup.sh
 ```
 
 This will:
-1. Create `~/.ssh/sockets` directory
-2. Back up existing SSH config
-3. Add PMACS configuration
-4. Prompt for your username
+1. Detect if you have `ncat` or GNU `nc` installed
+2. Create `~/.ssh/sockets` directory
+3. Back up existing SSH config
+4. Add PMACS configuration with the correct ProxyCommand
+5. Prompt for your username
 
 ### Manual Setup
 
@@ -69,7 +79,8 @@ Add to `~/.ssh/config`:
 Host prometheus
     HostName prometheus.pmacs.upenn.edu
     User YOUR_USERNAME
-    ProxyCommand nc -x 127.0.0.1:8889 %h %p
+    # Use ncat (recommended) or nc depending on what you installed
+    ProxyCommand ncat --proxy 127.0.0.1:8889 --proxy-type socks5 %h %p
     ServerAliveInterval 60
     ServerAliveCountMax 3
     ControlMaster auto
