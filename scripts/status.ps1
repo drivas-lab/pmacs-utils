@@ -3,6 +3,8 @@
     Check PMACS VPN status
 #>
 
+$ErrorActionPreference = "Stop"
+
 Write-Host ""
 Write-Host "==========================================" -ForegroundColor Cyan
 Write-Host "  PMACS VPN Status" -ForegroundColor Cyan
