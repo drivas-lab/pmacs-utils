@@ -4,8 +4,7 @@
 #>
 
 $ErrorActionPreference = "Stop"
-$ProjectDir = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
-if (-not $ProjectDir) { $ProjectDir = Split-Path -Parent $PSScriptRoot }
+$ProjectDir = Split-Path -Parent $PSScriptRoot
 
 function Write-Info { param($Msg) Write-Host "[INFO] $Msg" -ForegroundColor Blue }
 function Write-Ok   { param($Msg) Write-Host "[OK] $Msg" -ForegroundColor Green }
