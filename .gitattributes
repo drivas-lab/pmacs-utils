@@ -1,0 +1,21 @@
+# Handle line endings automatically for cross-platform compatibility
+* text=auto
+
+# Shell scripts must use LF (Unix line endings)
+*.sh text eol=lf
+
+# PowerShell can use CRLF
+*.ps1 text eol=crlf
+
+# Config files use LF
+.env* text eol=lf
+docker-compose.yml text eol=lf
+*.example text eol=lf
+
+# Markdown - auto
+*.md text
+
+# Ignore binary files
+*.png binary
+*.jpg binary
+*.gif binary
