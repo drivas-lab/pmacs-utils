@@ -1,0 +1,70 @@
+# PMACS SSH Configuration
+# ========================
+#
+# Add this to your ~/.ssh/config file to enable SSH access to PMACS hosts
+# through the VPN proxy container.
+#
+# How it works:
+#   1. VPN container creates a tunnel to PMACS network
+#   2. Container exposes SOCKS5 proxy on localhost:8889
+#   3. SSH uses ProxyCommand to route connections through the proxy
+#   4. From PMACS's perspective, your connection comes from inside their network
+#
+# Prerequisites:
+#   - netcat (nc) installed: brew install netcat (Mac) / apt install netcat (Linux)
+#   - VPN container running: ./scripts/connect.sh
+#
+# To install: Copy the section below to ~/.ssh/config
+# (Or run: cat ssh/config.example >> ~/.ssh/config)
+
+# =============================================================================
+# PMACS HOSTS - Copy everything below this line to ~/.ssh/config
+# =============================================================================
+
+# ------------------------------------------------------------------------------
+# PMACS Cluster - Main Entry Point
+# Usage: ssh prometheus
+# ------------------------------------------------------------------------------
+Host prometheus
+    HostName prometheus.pmacs.upenn.edu
+    User YOUR_USERNAME_HERE
+
+    # Route through VPN proxy (container must be running)
+    ProxyCommand nc -x 127.0.0.1:8889 %h %p
+
+    # Keep connection alive (PMACS has 2-hour idle timeout)
+    ServerAliveInterval 60
+    ServerAliveCountMax 3
+
+    # Multiplexing - reuse connections for speed
+    ControlMaster auto
+    ControlPath ~/.ssh/sockets/%r@%h-%p
+    ControlPersist 600
+
+# ------------------------------------------------------------------------------
+# Direct PMACS hosts (if you have other servers on the PMACS network)
+# Clone this block and change HostName for additional hosts
+# ------------------------------------------------------------------------------
+# Host pmacs-other
+#     HostName other-server.pmacs.upenn.edu
+#     User YOUR_USERNAME_HERE
+#     ProxyCommand nc -x 127.0.0.1:8889 %h %p
+#     ServerAliveInterval 60
+
+# =============================================================================
+# NOTES
+# =============================================================================
+#
+# Alternative ProxyCommand options:
+#
+# Using ncat (from nmap):
+#   ProxyCommand ncat --proxy 127.0.0.1:8889 --proxy-type socks5 %h %p
+#
+# Using socat:
+#   ProxyCommand socat - SOCKS4A:127.0.0.1:%h:%p,socksport=8889
+#
+# Using connect-proxy (Windows):
+#   ProxyCommand connect -S 127.0.0.1:8889 %h %p
+#
+# If you get "nc: invalid option -- 'x'" on older systems:
+#   Install GNU netcat or use ncat instead
