@@ -47,7 +47,9 @@ This tool runs the VPN inside a Docker container and exposes a proxy, so only th
 ### Prerequisites
 
 - [Docker Desktop](https://www.docker.com/products/docker-desktop/) (Mac, Windows, or Linux)
-- `netcat` for SSH proxy (`brew install netcat` on Mac, usually pre-installed on Linux)
+- A SOCKS-capable netcat for SSH proxy:
+  - **Mac:** `brew install nmap` (provides `ncat`) — see [macOS guide](docs/MAC.md)
+  - **Linux:** Usually pre-installed (`nc` or `netcat`)
 
 ### 1. Clone and Configure
 
@@ -157,17 +159,18 @@ docker logs -f pmacs-vpn
 
 ### "nc: invalid option -- 'x'"
 
-Your system has BSD netcat instead of GNU netcat. Options:
+Your system has BSD netcat which lacks SOCKS proxy support.
 
-**Mac:**
+**Mac (recommended):**
 ```bash
-brew install netcat
+brew install nmap
 ```
-
-**Or use ncat (from nmap):**
+Then update `~/.ssh/config` to use ncat:
 ```
 ProxyCommand ncat --proxy 127.0.0.1:8889 --proxy-type socks5 %h %p
 ```
+
+See the [macOS guide](docs/MAC.md) for more options.
 
 ### SSH connection hangs
 

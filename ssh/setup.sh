@@ -33,15 +33,28 @@ echo "  PMACS SSH Setup"
 echo "=========================================="
 echo ""
 
-# Check if netcat is available
-if ! command -v nc &> /dev/null; then
-    log_warn "netcat (nc) not found"
-    if [[ "$OSTYPE" == "darwin"* ]]; then
-        log_info "Install with: brew install netcat"
+# Check for SOCKS-capable netcat
+if [[ "$OSTYPE" == "darwin"* ]]; then
+    # macOS: BSD nc doesn't support -x, need ncat or GNU netcat
+    if command -v ncat &> /dev/null; then
+        USE_NCAT=true
+        log_ok "Found ncat (recommended for macOS)"
+    elif command -v nc &> /dev/null && nc -h 2>&1 | grep -q -- '-x'; then
+        USE_NCAT=false
+        log_ok "Found GNU netcat"
     else
-        log_info "Install with: sudo apt install netcat"
+        log_warn "No SOCKS-capable netcat found"
+        log_info "Install ncat: brew install nmap"
+        log_info "Then re-run this script"
+        echo ""
     fi
-    echo ""
+else
+    # Linux: system nc usually works
+    if ! command -v nc &> /dev/null; then
+        log_warn "netcat (nc) not found"
+        log_info "Install with: sudo apt install netcat"
+        echo ""
+    fi
 fi
 
 # Get username
@@ -83,12 +96,19 @@ fi
 # Append config
 log_info "Adding PMACS configuration to $SSH_CONFIG..."
 
+# Determine ProxyCommand based on available tools
+if [[ "${USE_NCAT:-false}" == "true" ]]; then
+    PROXY_CMD="ncat --proxy 127.0.0.1:8889 --proxy-type socks5 %h %p"
+else
+    PROXY_CMD="nc -x 127.0.0.1:8889 %h %p"
+fi
+
 # Extract just the config section (after the instructions)
 {
     echo ""
     echo "# PMACS Utils - Added $(date +%Y-%m-%d)"
     sed -n '/^# PMACS HOSTS/,/^# NOTES/p' "$EXAMPLE_CONFIG" | head -n -1
-} | sed "s/YOUR_USERNAME_HERE/$username/g" >> "$SSH_CONFIG"
+} | sed "s/YOUR_USERNAME_HERE/$username/g" | sed "s|nc -x 127.0.0.1:8889 %h %p|$PROXY_CMD|g" >> "$SSH_CONFIG"
 
 chmod 600 "$SSH_CONFIG"
 log_ok "Configuration added"
