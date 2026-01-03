@@ -159,7 +159,7 @@ async fn connect_vpn(user: Option<String>) -> Result<(), Box<dyn std::error::Err
     info!("Login successful: {}", login.username);
 
     println!("Getting tunnel configuration...");
-    let tunnel_config = gp::auth::getconfig(&config.vpn.gateway, &login.auth_cookie, None).await?;
+    let tunnel_config = gp::auth::getconfig(&config.vpn.gateway, &login, None).await?;
     info!(
         "Tunnel config: IP={} MTU={}",
         tunnel_config.internal_ip, tunnel_config.mtu
@@ -169,6 +169,7 @@ async fn connect_vpn(user: Option<String>) -> Result<(), Box<dyn std::error::Err
     println!("Establishing tunnel...");
     let mut tunnel = gp::tunnel::SslTunnel::connect(
         &config.vpn.gateway,
+        &login.username,
         &login.auth_cookie,
         &tunnel_config,
     )

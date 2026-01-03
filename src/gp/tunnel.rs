@@ -53,6 +53,7 @@ impl SslTunnel {
     ///
     /// # Arguments
     /// * `gateway` - Gateway hostname
+    /// * `username` - Username from login
     /// * `auth_cookie` - Authentication cookie from login
     /// * `config` - Tunnel configuration from getconfig
     ///
@@ -60,6 +61,7 @@ impl SslTunnel {
     /// Established SSL tunnel ready for packet I/O
     pub async fn connect(
         gateway: &str,
+        username: &str,
         auth_cookie: &str,
         config: &TunnelConfig,
     ) -> Result<Self, TunnelError> {
@@ -85,7 +87,7 @@ impl SslTunnel {
         };
 
         // 4. Send tunnel request
-        tunnel.send_tunnel_request(auth_cookie).await?;
+        tunnel.send_tunnel_request(username, auth_cookie).await?;
 
         // 5. Wait for "START_TUNNEL" response
         tunnel.wait_for_start().await?;
@@ -100,16 +102,16 @@ impl SslTunnel {
     }
 
     /// Send tunnel connection request
-    async fn send_tunnel_request(&mut self, auth_cookie: &str) -> Result<(), TunnelError> {
-        debug!("Sending tunnel request");
+    async fn send_tunnel_request(&mut self, username: &str, auth_cookie: &str) -> Result<(), TunnelError> {
+        debug!("Sending tunnel request for user: {}", username);
 
         let request = format!(
-            "GET /ssl-tunnel-connect.sslvpn?user=&authcookie={} HTTP/1.1\r\n\
+            "GET /ssl-tunnel-connect.sslvpn?user={}&authcookie={} HTTP/1.1\r\n\
              Host: gateway\r\n\
              Connection: keep-alive\r\n\
              User-Agent: PAN GlobalProtect\r\n\
              \r\n",
-            auth_cookie
+            username, auth_cookie
         );
 
         self.stream.write_all(request.as_bytes()).await?;
