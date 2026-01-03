@@ -1,0 +1,29 @@
+[package]
+name = "pmacs-vpn"
+version = "0.1.0"
+edition = "2021"
+authors = ["PMACS Utils Team"]
+description = "Split-tunnel VPN toolkit for PMACS cluster access"
+
+[dependencies]
+clap = { version = "4", features = ["derive"] }
+tokio = { version = "1", features = ["full"] }
+trust-dns-resolver = "0.23"
+serde = { version = "1", features = ["derive"] }
+toml = "0.8"
+thiserror = "1"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+[target.'cfg(unix)'.dependencies]
+nix = { version = "0.29", features = ["net", "process", "user"] }
+
+[target.'cfg(windows)'.dependencies]
+windows = { version = "0.58", features = ["Win32_NetworkManagement_IpHelper"] }
+
+[dev-dependencies]
+tempfile = "3"
+
+[profile.release]
+lto = true
+strip = true
