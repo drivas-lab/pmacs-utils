@@ -590,6 +590,107 @@ pub async fn getconfig(
     })
 }
 
+/// Get tunnel configuration using raw auth cookie (for daemon mode)
+/// This is used when the parent process has already done auth and saved the cookie
+pub async fn getconfig_with_cookie(
+    gateway: &str,
+    username: &str,
+    auth_cookie: &str,
+    portal: &str,
+    domain: &str,
+    preferred_ip: Option<IpAddr>,
+) -> Result<TunnelConfig, AuthError> {
+    info!("Getting tunnel configuration (daemon mode)");
+
+    let client = Client::builder()
+        .danger_accept_invalid_certs(false)
+        .build()?;
+
+    let url = format!("https://{}/ssl-vpn/getconfig.esp", gateway);
+
+    let hostname = hostname::get()
+        .ok()
+        .and_then(|h| h.into_string().ok())
+        .unwrap_or_else(|| "unknown".to_string());
+
+    let preferred = preferred_ip
+        .map(|ip| ip.to_string())
+        .unwrap_or_else(|| "0.0.0.0".to_string());
+
+    let params = [
+        ("user", username),
+        ("portal", portal),
+        ("domain", domain),
+        ("authcookie", auth_cookie),
+        ("preferred-ip", preferred.as_str()),
+        ("clientos", "Windows"),
+        ("os-version", "Microsoft Windows 10 Pro"),
+        ("app-version", "4.1.0-10"),
+        ("protocol-version", "p1"),
+        ("client-type", "1"),
+        ("enc-algo", "aes-256-gcm,aes-128-gcm,aes-128-cbc"),
+        ("hmac-algo", "sha1"),
+        ("computer", hostname.as_str()),
+    ];
+
+    let response = client
+        .post(&url)
+        .header("User-Agent", "PAN GlobalProtect")
+        .form(&params)
+        .send()
+        .await?;
+
+    let body = response.text().await?;
+    debug!("Getconfig response: {}", body);
+
+    let policy: PolicyXml = quick_xml::de::from_str(&body)
+        .map_err(|e| AuthError::AuthFailed(format!("Invalid getconfig response: {}", e)))?;
+
+    let internal_ip: IpAddr = policy
+        .ip_address
+        .as_ref()
+        .ok_or_else(|| AuthError::MissingField("ip-address".to_string()))?
+        .parse()
+        .map_err(|_| AuthError::InvalidResponse)?;
+
+    let internal_ip6 = policy
+        .ipv6_address
+        .as_ref()
+        .and_then(|s| s.parse().ok());
+
+    let mtu = policy
+        .mtu
+        .as_ref()
+        .and_then(|s| s.parse::<u16>().ok())
+        .filter(|&m| m > 0)
+        .unwrap_or(1400);
+
+    let dns_servers = policy
+        .dns
+        .as_ref()
+        .map(|dns| {
+            dns.member
+                .iter()
+                .filter_map(|s| s.parse().ok())
+                .collect()
+        })
+        .unwrap_or_default();
+
+    let timeout_seconds = policy
+        .timeout
+        .as_ref()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(3600);
+
+    Ok(TunnelConfig {
+        mtu,
+        internal_ip,
+        internal_ip6,
+        dns_servers,
+        timeout_seconds,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -2,6 +2,7 @@ use clap::{Parser, Subcommand};
 use pmacs_vpn::gp;
 use pmacs_vpn::vpn::routing::VpnRouter;
 use pmacs_vpn::vpn::hosts::HostsManager;
+use pmacs_vpn::AuthToken;
 use tracing::{error, info, warn, Level};
 use tracing_subscriber::FmtSubscriber;
 
@@ -69,6 +70,29 @@ enum Commands {
     Tray,
 }
 
+/// Check if running with admin privileges (Windows)
+#[cfg(windows)]
+fn is_admin() -> bool {
+    use std::process::Command;
+    // Quick check using net session (requires admin)
+    Command::new("net")
+        .args(["session"])
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false)
+}
+
+/// Check if running with root privileges (Unix)
+#[cfg(not(windows))]
+fn is_admin() -> bool {
+    unsafe { libc::geteuid() == 0 }
+}
+
+/// Commands that require admin privileges
+fn requires_admin(cmd: &Commands) -> bool {
+    matches!(cmd, Commands::Connect { .. } | Commands::Disconnect | Commands::Tray)
+}
+
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let cli = Cli::parse();
@@ -87,11 +111,30 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .finish();
     tracing::subscriber::set_global_default(subscriber)?;
 
+    // Check admin privileges for commands that need it
+    if requires_admin(&cli.command) && !is_admin() {
+        eprintln!("ERROR: This command requires Administrator privileges.\n");
+        #[cfg(windows)]
+        eprintln!("Options:");
+        #[cfg(windows)]
+        eprintln!("  1. Right-click terminal → Run as Administrator");
+        #[cfg(windows)]
+        eprintln!("  2. Use the desktop shortcut: scripts\\connect.ps1");
+        #[cfg(not(windows))]
+        eprintln!("Run with: sudo pmacs-vpn {}", match &cli.command {
+            Commands::Connect { .. } => "connect",
+            Commands::Disconnect => "disconnect",
+            Commands::Tray => "tray",
+            _ => "",
+        });
+        std::process::exit(1);
+    }
+
     match cli.command {
         Commands::Connect { user, save_password, forget_password, keep_alive, daemon, _daemon_pid } => {
-            // Daemon mode: spawn detached child process
+            // Daemon mode: do auth in parent, spawn detached child
             if daemon {
-                match spawn_daemon(&user, save_password, forget_password, keep_alive) {
+                match spawn_daemon(&user, save_password, forget_password, keep_alive).await {
                     Ok(pid) => {
                         println!("VPN daemon started (PID: {})", pid);
                         println!("Use 'pmacs-vpn status' to check connection");
@@ -103,7 +146,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     }
                 }
             } else {
-                // If _daemon_pid is set, we're running as a background daemon
+                // If _daemon_pid is set, we're running as a background daemon child
                 let is_daemon = _daemon_pid.is_some();
                 info!("Connecting to PMACS VPN...");
                 match connect_vpn(user, save_password, forget_password, keep_alive, is_daemon).await {
@@ -222,25 +265,63 @@ async fn run_tray_mode() {
                     info!("Tray: Received connect command");
                     let _ = status_tx_clone.send(VpnStatus::Connecting);
 
-                    // For now, spawn the VPN as a daemon process
-                    // A more integrated solution would run the VPN directly
-                    let spawn_result = spawn_daemon(&None, false, false, false);
-                    let pid_opt = spawn_result.ok();
+                    // Check if we have cached credentials
+                    let config_path = std::path::PathBuf::from("pmacs-vpn.toml");
+                    let has_config = config_path.exists();
 
-                    if let Some(pid) = pid_opt {
-                        info!("VPN daemon started with PID {}", pid);
-                        // Wait a bit for connection to establish
-                        tokio::time::sleep(tokio::time::Duration::from_secs(5)).await;
+                    if !has_config {
+                        let _ = status_tx_clone.send(VpnStatus::Error(
+                            "No config file. Run 'pmacs-vpn connect' first.".to_string()
+                        ));
+                        continue;
+                    }
 
-                        // Check if connected
-                        if let Ok(Some(state)) = pmacs_vpn::VpnState::load() {
-                            let _ = status_tx_clone.send(VpnStatus::Connected {
-                                ip: state.gateway.to_string(),
-                            });
+                    // Load config and check for cached password
+                    let config = match pmacs_vpn::Config::load(&config_path) {
+                        Ok(c) => c,
+                        Err(e) => {
+                            let _ = status_tx_clone.send(VpnStatus::Error(format!("Config error: {}", e)));
+                            continue;
                         }
-                    } else {
-                        error!("Failed to start VPN daemon");
-                        let _ = status_tx_clone.send(VpnStatus::Error("Failed to spawn daemon".to_string()));
+                    };
+
+                    let username = config.vpn.username.clone().unwrap_or_default();
+                    if username.is_empty() || pmacs_vpn::get_password(&username).is_none() {
+                        let _ = status_tx_clone.send(VpnStatus::Error(
+                            "No cached password. Run 'pmacs-vpn connect --save-password' first.".to_string()
+                        ));
+                        continue;
+                    }
+
+                    // Spawn daemon (auth happens in parent, passes token to child)
+                    match spawn_daemon(&None, false, false, false).await {
+                        Ok(pid) => {
+                            info!("VPN daemon started with PID {}", pid);
+
+                            // Poll for connection status instead of fixed wait
+                            let mut connected = false;
+                            for _ in 0..20 {  // max 10 seconds
+                                tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
+                                if let Ok(Some(state)) = pmacs_vpn::VpnState::load() {
+                                    if state.is_daemon_running() {
+                                        let _ = status_tx_clone.send(VpnStatus::Connected {
+                                            ip: state.gateway.to_string(),
+                                        });
+                                        connected = true;
+                                        break;
+                                    }
+                                }
+                            }
+                            if !connected {
+                                let _ = status_tx_clone.send(VpnStatus::Error(
+                                    "Connection timeout - check logs".to_string()
+                                ));
+                            }
+                        }
+                        Err(e) => {
+                            error!("Failed to start VPN daemon: {}", e);
+                            let _ = status_tx_clone.send(VpnStatus::Error(format!("Failed: {}", e)));
+                        }
                     }
                 }
                 TrayCommand::Disconnect => {
@@ -304,38 +385,91 @@ async fn run_tray_mode() {
 }
 
 /// Spawn VPN as a detached background process (daemon mode)
-fn spawn_daemon(
+/// Does authentication FIRST in parent, then passes token to child
+async fn spawn_daemon(
     user: &Option<String>,
     save_password: bool,
     forget_password: bool,
     keep_alive: bool,
-) -> Result<u32, Box<dyn std::error::Error>> {
+) -> Result<u32, Box<dyn std::error::Error + Send + Sync>> {
     use std::process::Command;
 
-    // Build command with same args minus --daemon, plus --_daemon-pid marker
+    // 1. Load or create config
+    let config_path = std::path::PathBuf::from("pmacs-vpn.toml");
+    let config = if config_path.exists() {
+        pmacs_vpn::Config::load(&config_path)?
+    } else {
+        println!("No config found. Run 'pmacs-vpn connect' first to set up.");
+        return Err("No config file".into());
+    };
+
+    // 2. Get username
+    let username = user
+        .clone()
+        .or_else(|| config.vpn.username.clone())
+        .unwrap_or_else(|| prompt("Username", None));
+
+    // 3. Handle --forget-password
+    if forget_password {
+        if let Err(e) = pmacs_vpn::delete_password(&username) {
+            warn!("Could not delete stored password: {}", e);
+        } else {
+            info!("Deleted stored password for {}", username);
+        }
+    }
+
+    // 4. Get password (from keychain or prompt)
+    let password = if !forget_password {
+        match pmacs_vpn::get_password(&username) {
+            Some(stored) => {
+                println!("Using cached password");
+                stored
+            }
+            None => rpassword::prompt_password("Password: ")?,
+        }
+    } else {
+        rpassword::prompt_password("Password: ")?
+    };
+
+    // 5. Do auth flow
+    println!("Authenticating...");
+    let prelogin = gp::auth::prelogin(&config.vpn.gateway).await?;
+    info!("Auth method: {:?}", prelogin.auth_method);
+
+    println!("Logging in (check phone for DUO push)...");
+    let login = gp::auth::login(&config.vpn.gateway, &username, &password, Some("push")).await?;
+    println!("Login successful!");
+
+    // 6. Save password if requested
+    if save_password {
+        match pmacs_vpn::store_password(&username, &password) {
+            Ok(()) => println!("Password saved for next time"),
+            Err(e) => warn!("Failed to store password: {}", e),
+        }
+    }
+
+    // 7. Save auth token for daemon
+    let token = AuthToken::new(
+        config.vpn.gateway.clone(),
+        login.username.clone(),
+        login.auth_cookie.clone(),
+        login.portal.clone(),
+        login.domain.clone(),
+        config.hosts.clone(),
+        keep_alive,
+    );
+    token.save()?;
+
+    // 8. Spawn daemon child (it will read the token file)
     let exe = std::env::current_exe()?;
     let mut cmd = Command::new(&exe);
     cmd.arg("connect");
-    cmd.arg("--_daemon-pid=1"); // Marker that tells child it's a daemon (value ignored)
-
-    if let Some(u) = user {
-        cmd.args(["--user", u]);
-    }
-    if save_password {
-        cmd.arg("--save-password");
-    }
-    if forget_password {
-        cmd.arg("--forget-password");
-    }
-    if keep_alive {
-        cmd.arg("--keep-alive");
-    }
+    cmd.arg("--_daemon-pid=1");
 
     // Platform-specific detachment
     #[cfg(windows)]
     {
         use std::os::windows::process::CommandExt;
-        // CREATE_NEW_PROCESS_GROUP | DETACHED_PROCESS
         const CREATE_NEW_PROCESS_GROUP: u32 = 0x00000200;
         const DETACHED_PROCESS: u32 = 0x00000008;
         cmd.creation_flags(CREATE_NEW_PROCESS_GROUP | DETACHED_PROCESS);
@@ -398,6 +532,18 @@ fn prompt_yn(label: &str, default_yes: bool) -> bool {
 
 /// Connect to VPN using native GlobalProtect implementation
 async fn connect_vpn(user: Option<String>, save_password: bool, forget_password: bool, keep_alive: bool, is_daemon: bool) -> Result<(), Box<dyn std::error::Error>> {
+    // Check if we're a daemon child with an auth token
+    if is_daemon {
+        if let Some(token) = AuthToken::load()? {
+            // Delete token immediately (one-time use)
+            AuthToken::delete()?;
+            return connect_vpn_with_token(token).await;
+        }
+        // No token but is_daemon? That's an error
+        return Err("Daemon mode requires auth token from parent".into());
+    }
+
+    // Normal interactive flow
     // 1. Load or create config interactively
     let config_path = std::path::PathBuf::from("pmacs-vpn.toml");
     let (config, save_config) = if config_path.exists() {
@@ -457,7 +603,7 @@ async fn connect_vpn(user: Option<String>, save_password: bool, forget_password:
         // Try to get stored password first
         match pmacs_vpn::get_password(&username) {
             Some(stored) => {
-                info!("Using stored password for {}", username);
+                println!("Using cached password");
                 stored
             }
             None => rpassword::prompt_password("Password: ")?,
@@ -472,9 +618,17 @@ async fn connect_vpn(user: Option<String>, save_password: bool, forget_password:
     let prelogin = gp::auth::prelogin(&config.vpn.gateway).await?;
     info!("Auth method: {:?}", prelogin.auth_method);
 
-    println!("Logging in (check phone for DUO push if prompted)...");
+    println!("Logging in (check phone for DUO push)...");
     let login = gp::auth::login(&config.vpn.gateway, &username, &password, Some("push")).await?;
-    info!("Login successful: {}", login.username);
+    println!("Login successful!");
+
+    // 6. Save password if requested
+    if save_password {
+        match pmacs_vpn::store_password(&username, &password) {
+            Ok(()) => println!("Password saved for next time"),
+            Err(e) => warn!("Failed to store password: {}", e),
+        }
+    }
 
     println!("Getting tunnel configuration...");
     let tunnel_config = gp::auth::getconfig(&config.vpn.gateway, &login, None).await?;
@@ -509,15 +663,7 @@ async fn connect_vpn(user: Option<String>, save_password: bool, forget_password:
     }
     println!("  Session expires in: 16 hours");
 
-    // 8. Save password if --save-password was passed
-    if save_password {
-        match pmacs_vpn::store_password(&username, &password) {
-            Ok(()) => info!("Password stored for {}", username),
-            Err(e) => warn!("Failed to store password: {}", e),
-        }
-    }
-
-    // 9. Start tunnel in background FIRST, then add routes
+    // 7. Start tunnel in background FIRST, then add routes
     // This is critical: DNS queries need the tunnel running to forward packets!
     let tunnel_handle = tokio::spawn(async move {
         tunnel.run().await
@@ -612,7 +758,117 @@ async fn connect_vpn(user: Option<String>, save_password: bool, forget_password:
         }
     };
 
-    // 14. Cleanup
+    // 12. Cleanup
+    cleanup_vpn(&state).await?;
+
+    result
+}
+
+/// Connect to VPN using pre-authenticated token (daemon child)
+async fn connect_vpn_with_token(token: AuthToken) -> Result<(), Box<dyn std::error::Error>> {
+    info!("Daemon: connecting with auth token...");
+
+    // Get tunnel config using the auth cookie
+    let tunnel_config = gp::auth::getconfig_with_cookie(
+        &token.gateway,
+        &token.username,
+        &token.auth_cookie,
+        &token.portal,
+        &token.domain,
+        None,
+    ).await?;
+    info!(
+        "Tunnel config: IP={} MTU={}",
+        tunnel_config.internal_ip, tunnel_config.mtu
+    );
+
+    // Create tunnel
+    let mut tunnel = gp::tunnel::SslTunnel::connect_with_options(
+        &token.gateway,
+        &token.username,
+        &token.auth_cookie,
+        &tunnel_config,
+        token.keep_alive,
+    )
+    .await?;
+
+    // Prepare state and router
+    let gateway_ip = tunnel_config.internal_ip.to_string();
+    let tun_name = tunnel.tun_name().to_string();
+    let internal_ip = tunnel_config.internal_ip;
+    let dns_servers = tunnel_config.dns_servers.clone();
+    let hosts_to_route = token.hosts.clone();
+
+    info!("Daemon: tunnel established, TUN={}", tun_name);
+
+    // Start tunnel in background
+    let tunnel_handle = tokio::spawn(async move {
+        tunnel.run().await
+    });
+
+    // Give the tunnel a moment to start
+    tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+
+    // Add routes
+    let router = VpnRouter::with_interface(gateway_ip, tun_name.clone())?;
+    let mut state = pmacs_vpn::VpnState::new(tun_name, internal_ip);
+
+    // Route to DNS servers first
+    for dns_server in &dns_servers {
+        let dns_ip = dns_server.to_string();
+        if let Err(e) = router.add_ip_route(&dns_ip) {
+            warn!("Failed to add route to DNS {}: {}", dns_ip, e);
+        }
+    }
+
+    // Route to target hosts
+    let mut hosts_map = std::collections::HashMap::new();
+    for host in &hosts_to_route {
+        let result = if !dns_servers.is_empty() {
+            router.add_host_route_with_dns(host, &dns_servers)
+        } else {
+            router.add_host_route(host)
+        };
+
+        match result {
+            Ok(ip) => {
+                state.add_route(host.clone(), ip);
+                state.add_hosts_entry(host.clone(), ip);
+                hosts_map.insert(host.clone(), ip);
+                info!("Added route: {} -> {}", host, ip);
+            }
+            Err(e) => {
+                error!("Failed to add route for {}: {}", host, e);
+            }
+        }
+    }
+
+    // Update hosts file
+    let hosts_mgr = HostsManager::new();
+    hosts_mgr.add_entries(&hosts_map)?;
+
+    // Save state with PID
+    state.set_pid(std::process::id());
+    state.save()?;
+
+    info!("Daemon: VPN ready");
+
+    // Wait for tunnel completion or signal
+    let result = tokio::select! {
+        result = tunnel_handle => {
+            match result {
+                Ok(Ok(())) => Ok(()),
+                Ok(Err(e)) => Err(Box::new(e) as Box<dyn std::error::Error>),
+                Err(e) => Err(Box::new(e) as Box<dyn std::error::Error>),
+            }
+        }
+        _ = tokio::signal::ctrl_c() => {
+            info!("Daemon: received shutdown signal");
+            Ok(())
+        }
+    };
+
+    // Cleanup
     cleanup_vpn(&state).await?;
 
     result

@@ -3,6 +3,8 @@
 //! Tracks active routes and hosts entries to enable cleanup after crashes
 //! or unexpected termination. State is stored in `~/.pmacs-vpn/state.json`.
 //!
+//! Also handles auth tokens for daemon mode (parent does auth, child uses token).
+//!
 //! # State File Format
 //!
 //! ```json
@@ -252,6 +254,118 @@ fn chrono_lite_now() -> String {
         .unwrap_or_default();
 
     format!("{}", duration.as_secs())
+}
+
+/// Auth token for passing credentials from parent to daemon child
+/// Stored temporarily in ~/.pmacs-vpn/auth-token.json
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AuthToken {
+    /// Gateway URL
+    pub gateway: String,
+    /// Username
+    pub username: String,
+    /// Auth cookie from login
+    pub auth_cookie: String,
+    /// Portal name from login
+    pub portal: String,
+    /// Domain from login
+    pub domain: String,
+    /// Hosts to route
+    pub hosts: Vec<String>,
+    /// Use aggressive keepalive
+    pub keep_alive: bool,
+    /// Created timestamp (for expiry check)
+    pub created_at: u64,
+}
+
+impl AuthToken {
+    /// Create a new auth token
+    pub fn new(
+        gateway: String,
+        username: String,
+        auth_cookie: String,
+        portal: String,
+        domain: String,
+        hosts: Vec<String>,
+        keep_alive: bool,
+    ) -> Self {
+        use std::time::{SystemTime, UNIX_EPOCH};
+        let created_at = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+
+        Self {
+            gateway,
+            username,
+            auth_cookie,
+            portal,
+            domain,
+            hosts,
+            keep_alive,
+            created_at,
+        }
+    }
+
+    /// Get the auth token file path
+    fn token_file_path() -> Result<PathBuf, StateError> {
+        let home = std::env::var("HOME")
+            .or_else(|_| std::env::var("USERPROFILE"))
+            .or_else(|_| std::env::var("LOCALAPPDATA"))
+            .map_err(|_| {
+                StateError::DirectoryError("HOME/USERPROFILE/LOCALAPPDATA not set".into())
+            })?;
+
+        let state_dir = PathBuf::from(home).join(".pmacs-vpn");
+        if !state_dir.exists() {
+            fs::create_dir_all(&state_dir)?;
+        }
+
+        Ok(state_dir.join("auth-token.json"))
+    }
+
+    /// Save auth token (called by parent before spawning daemon)
+    pub fn save(&self) -> Result<PathBuf, StateError> {
+        let path = Self::token_file_path()?;
+        let content = serde_json::to_string_pretty(self)?;
+        fs::write(&path, content)?;
+        Ok(path)
+    }
+
+    /// Load auth token (called by daemon child)
+    pub fn load() -> Result<Option<Self>, StateError> {
+        let path = Self::token_file_path()?;
+        if !path.exists() {
+            return Ok(None);
+        }
+
+        let content = fs::read_to_string(&path)?;
+        let token: AuthToken = serde_json::from_str(&content)?;
+
+        // Check if token is expired (5 minutes max)
+        use std::time::{SystemTime, UNIX_EPOCH};
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+
+        if now - token.created_at > 300 {
+            // Token expired, delete it
+            let _ = Self::delete();
+            return Ok(None);
+        }
+
+        Ok(Some(token))
+    }
+
+    /// Delete auth token file (called after daemon starts)
+    pub fn delete() -> Result<(), StateError> {
+        let path = Self::token_file_path()?;
+        if path.exists() {
+            fs::remove_file(&path)?;
+        }
+        Ok(())
+    }
 }
 
 #[cfg(test)]

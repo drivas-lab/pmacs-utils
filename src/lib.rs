@@ -34,4 +34,4 @@ pub mod vpn;
 pub use config::{Config, VpnConfig};
 pub use credentials::{delete_password, get_password, store_password};
 pub use openconnect::handle_script_mode;
-pub use state::VpnState;
+pub use state::{AuthToken, VpnState};
