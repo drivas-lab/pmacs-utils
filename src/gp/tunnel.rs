@@ -15,7 +15,7 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 use tokio::time::interval;
 use tokio_rustls::TlsConnector;
-use tracing::{debug, error, info, warn};
+use tracing::{debug, error, info};
 
 /// Tunnel errors
 #[derive(Error, Debug)]
@@ -102,7 +102,11 @@ impl SslTunnel {
     }
 
     /// Send tunnel connection request
-    async fn send_tunnel_request(&mut self, username: &str, auth_cookie: &str) -> Result<(), TunnelError> {
+    async fn send_tunnel_request(
+        &mut self,
+        username: &str,
+        auth_cookie: &str,
+    ) -> Result<(), TunnelError> {
         debug!("Sending tunnel request for user: {}", username);
 
         let request = format!(
@@ -149,10 +153,13 @@ impl SslTunnel {
     /// Run the tunnel event loop
     ///
     /// This function runs until the tunnel is disconnected or an error occurs.
-    /// It handles:
-    /// - Reading packets from TUN and sending to gateway
-    /// - Reading packets from gateway and writing to TUN
+    /// It handles three concurrent operations using tokio::select!:
+    /// - Reading packets from TUN and sending to gateway (outbound)
+    /// - Reading packets from gateway and writing to TUN (inbound)
     /// - Sending keepalive packets periodically
+    ///
+    /// The async TUN device ensures outbound packets are processed immediately
+    /// rather than waiting for network events or keepalive ticks.
     pub async fn run(&mut self) -> Result<(), TunnelError> {
         info!("Starting tunnel event loop");
 
@@ -160,53 +167,82 @@ impl SslTunnel {
         let mut keepalive = interval(self.keepalive_interval);
         keepalive.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
-        loop {
-            let mut tun_buf = vec![0u8; mtu + 128];
-            let mut net_buf = vec![0u8; mtu + 128];
+        // Pre-allocate buffers outside the loop to avoid repeated allocation
+        let mut tun_buf = vec![0u8; mtu + 128];
+        let mut net_header = [0u8; 16];
 
+        loop {
             tokio::select! {
-                // Packet from gateway → decrypt and write to TUN
-                result = self.recv_packet(&mut net_buf) => {
+                // Priority 1: Outbound traffic (TUN → Gateway)
+                // Packets from applications destined for VPN network
+                result = self.tun.read(&mut tun_buf) => {
                     match result {
                         Ok(n) if n > 0 => {
-                            debug!("Gateway read {} bytes", n);
-                            self.tun.write(&net_buf[..n])?;
+                            debug!("TUN read {} bytes (outbound)", n);
+                            self.send_packet(&tun_buf[..n]).await?;
                         }
                         Ok(_) => {
-                            // Keepalive or empty packet
-                            debug!("Received keepalive");
-                        }
-                        Err(TunnelError::Disconnected) => {
-                            info!("Tunnel disconnected");
-                            return Err(TunnelError::Disconnected);
+                            // Empty read, continue
                         }
                         Err(e) => {
-                            error!("Gateway read error: {}", e);
-                            return Err(e);
-                        }
-                    }
-
-                    // Try to read from TUN (best effort, ignore errors)
-                    if let Ok(n) = self.tun.read(&mut tun_buf) {
-                        if n > 0 {
-                            debug!("TUN read {} bytes", n);
-                            self.send_packet(&tun_buf[..n]).await?;
+                            error!("TUN read error: {}", e);
+                            return Err(e.into());
                         }
                     }
                 }
 
-                // Send keepalive periodically
+                // Priority 2: Inbound traffic (Gateway → TUN)
+                // Packets from VPN network destined for local applications
+                result = self.stream.read_exact(&mut net_header) => {
+                    match result {
+                        Ok(_) => {
+                            // Parse length from header
+                            let len = u16::from_be_bytes([net_header[6], net_header[7]]) as usize;
+
+                            if len == 0 {
+                                // Keepalive packet from gateway
+                                debug!("Received keepalive from gateway");
+                                continue;
+                            }
+
+                            // Read the payload
+                            let mut payload = vec![0u8; len];
+                            self.stream.read_exact(&mut payload).await?;
+
+                            // Decode the full frame
+                            let mut frame = Vec::with_capacity(16 + len);
+                            frame.extend_from_slice(&net_header);
+                            frame.extend_from_slice(&payload);
+
+                            let packet = GpPacket::decode(&frame)?;
+
+                            if packet.is_keepalive() {
+                                debug!("Received keepalive (data packet)");
+                                continue;
+                            }
+
+                            debug!("Gateway read {} bytes (inbound)", packet.payload.len());
+
+                            // Write to TUN (deliver to local applications)
+                            if !packet.payload.is_empty() {
+                                self.tun.write(&packet.payload).await?;
+                            }
+                        }
+                        Err(e) if e.kind() == io::ErrorKind::UnexpectedEof => {
+                            info!("Tunnel disconnected (EOF)");
+                            return Err(TunnelError::Disconnected);
+                        }
+                        Err(e) => {
+                            error!("Gateway read error: {}", e);
+                            return Err(TunnelError::IoError(e));
+                        }
+                    }
+                }
+
+                // Priority 3: Keepalive timer
                 _ = keepalive.tick() => {
                     debug!("Sending keepalive");
                     self.send_keepalive().await?;
-
-                    // Try to read from TUN while we're here (best effort)
-                    if let Ok(n) = self.tun.read(&mut tun_buf) {
-                        if n > 0 {
-                            debug!("TUN read {} bytes", n);
-                            self.send_packet(&tun_buf[..n]).await?;
-                        }
-                    }
                 }
             }
         }
@@ -222,56 +258,6 @@ impl SslTunnel {
         self.stream.flush().await?;
 
         Ok(())
-    }
-
-    /// Receive a packet from the gateway
-    ///
-    /// Returns the number of bytes in the payload (0 for keepalives)
-    async fn recv_packet(&mut self, buf: &mut [u8]) -> Result<usize, TunnelError> {
-        // Read the 16-byte header first
-        let mut header = [0u8; 16];
-        self.stream.read_exact(&mut header).await.map_err(|e| {
-            if e.kind() == io::ErrorKind::UnexpectedEof {
-                TunnelError::Disconnected
-            } else {
-                TunnelError::IoError(e)
-            }
-        })?;
-
-        // Parse length from header
-        let len = u16::from_be_bytes([header[6], header[7]]) as usize;
-
-        if len == 0 {
-            // Keepalive packet
-            return Ok(0);
-        }
-
-        // Read the payload
-        let mut payload = vec![0u8; len];
-        self.stream.read_exact(&mut payload).await?;
-
-        // Decode the full frame
-        let mut frame = Vec::with_capacity(16 + len);
-        frame.extend_from_slice(&header);
-        frame.extend_from_slice(&payload);
-
-        let packet = GpPacket::decode(&frame)?;
-
-        if packet.is_keepalive() {
-            return Ok(0);
-        }
-
-        if packet.payload.len() > buf.len() {
-            warn!(
-                "Received packet larger than buffer: {} > {}",
-                packet.payload.len(),
-                buf.len()
-            );
-            return Ok(0);
-        }
-
-        buf[..packet.payload.len()].copy_from_slice(&packet.payload);
-        Ok(packet.payload.len())
     }
 
     /// Send a keepalive packet
@@ -291,11 +277,7 @@ async fn tls_connect(
 ) -> Result<tokio_rustls::client::TlsStream<TcpStream>, TunnelError> {
     // Load webpki root certificates
     let mut root_store = RootCertStore::empty();
-    root_store.extend(
-        webpki_roots::TLS_SERVER_ROOTS
-            .iter()
-            .cloned()
-    );
+    root_store.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
 
     // Create TLS config
     let config = rustls::ClientConfig::builder()

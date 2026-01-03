@@ -4,8 +4,9 @@
 
 use crate::gp::auth::TunnelConfig;
 use thiserror::Error;
-use tun::Device;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tracing::{debug, info};
+use tun::AbstractDevice;
 
 /// TUN device errors
 #[derive(Error, Debug)]
@@ -23,9 +24,9 @@ pub enum TunError {
     InvalidPacketSize(usize),
 }
 
-/// Cross-platform TUN device wrapper
+/// Cross-platform async TUN device wrapper
 pub struct TunDevice {
-    device: tun::platform::Device,
+    device: tun::AsyncDevice,
     name: String,
     mtu: usize,
 }
@@ -37,7 +38,7 @@ impl TunDevice {
     /// * `config` - Tunnel configuration from getconfig
     ///
     /// # Returns
-    /// A configured TUN device ready for packet I/O
+    /// A configured TUN device ready for async packet I/O
     ///
     /// # Platform Notes
     /// - macOS: Creates utunN device
@@ -60,24 +61,28 @@ impl TunDevice {
             .netmask(
                 // Use /32 for point-to-point
                 match config.internal_ip {
-                    std::net::IpAddr::V4(_) => std::net::IpAddr::V4(std::net::Ipv4Addr::new(255, 255, 255, 255)),
-                    std::net::IpAddr::V6(_) => {
-                        std::net::IpAddr::V6(std::net::Ipv6Addr::new(0xffff, 0xffff, 0xffff, 0xffff, 0xffff, 0xffff, 0xffff, 0xffff))
+                    std::net::IpAddr::V4(_) => {
+                        std::net::IpAddr::V4(std::net::Ipv4Addr::new(255, 255, 255, 255))
                     }
-                }
+                    std::net::IpAddr::V6(_) => std::net::IpAddr::V6(std::net::Ipv6Addr::new(
+                        0xffff, 0xffff, 0xffff, 0xffff, 0xffff, 0xffff, 0xffff, 0xffff,
+                    )),
+                },
             )
-            .mtu(config.mtu as i32)
+            .mtu(config.mtu)
             .up();
 
         #[cfg(target_os = "linux")]
-        tun_config.platform(|platform_config| {
+        tun_config.platform_config(|platform_config| {
             platform_config.packet_information(false);
         });
 
-        let device = tun::create(&tun_config)
+        // Create async device directly (tun 0.8 API)
+        let device = tun::create_as_async(&tun_config)
             .map_err(|e| TunError::CreationFailed(e.to_string()))?;
 
-        let name = device.name()
+        let name = device
+            .tun_name()
             .map_err(|e| TunError::CreationFailed(e.to_string()))?;
 
         info!("TUN device created: {}", name);
@@ -91,15 +96,14 @@ impl TunDevice {
 
     /// Read a packet from the TUN device (outbound traffic from host)
     ///
+    /// This is async and non-blocking - suitable for use in tokio::select!
     /// Returns the number of bytes read. The buffer should be at least MTU size.
-    pub fn read(&mut self, buf: &mut [u8]) -> Result<usize, TunError> {
-        use std::io::Read;
-
+    pub async fn read(&mut self, buf: &mut [u8]) -> Result<usize, TunError> {
         if buf.len() < self.mtu {
             debug!("Warning: read buffer smaller than MTU");
         }
 
-        let n = self.device.read(buf)?;
+        let n = self.device.read(buf).await?;
         debug!("Read {} bytes from TUN", n);
 
         if n > self.mtu {
@@ -111,10 +115,9 @@ impl TunDevice {
 
     /// Write a packet to the TUN device (inbound traffic to host)
     ///
+    /// This is async and non-blocking.
     /// Returns the number of bytes written.
-    pub fn write(&mut self, buf: &[u8]) -> Result<usize, TunError> {
-        use std::io::Write;
-
+    pub async fn write(&mut self, buf: &[u8]) -> Result<usize, TunError> {
         if buf.is_empty() {
             return Ok(0);
         }
@@ -123,7 +126,7 @@ impl TunDevice {
             return Err(TunError::InvalidPacketSize(buf.len()));
         }
 
-        let n = self.device.write(buf)?;
+        let n = self.device.write(buf).await?;
         debug!("Wrote {} bytes to TUN", n);
 
         Ok(n)
