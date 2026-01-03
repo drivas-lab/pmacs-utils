@@ -25,6 +25,14 @@ enum Commands {
         /// Username for VPN authentication
         #[arg(short, long)]
         user: Option<String>,
+
+        /// Store password in system keychain after successful login
+        #[arg(long)]
+        save_password: bool,
+
+        /// Delete stored password before prompting
+        #[arg(long)]
+        forget_password: bool,
     },
     /// Disconnect from VPN and clean up routes
     Disconnect,
@@ -39,6 +47,12 @@ enum Commands {
     ///
     /// Usage: sudo openconnect ... -s 'pmacs-vpn script'
     Script,
+    /// Delete stored password for a user
+    ForgetPassword {
+        /// Username whose password should be deleted
+        #[arg(short, long)]
+        user: String,
+    },
 }
 
 #[tokio::main]
@@ -60,9 +74,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     tracing::subscriber::set_global_default(subscriber)?;
 
     match cli.command {
-        Commands::Connect { user } => {
+        Commands::Connect { user, save_password, forget_password } => {
             info!("Connecting to PMACS VPN...");
-            match connect_vpn(user).await {
+            match connect_vpn(user, save_password, forget_password).await {
                 Ok(()) => info!("VPN connection closed"),
                 Err(e) => {
                     error!("VPN connection failed: {}", e);
@@ -120,13 +134,22 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
             }
         }
+        Commands::ForgetPassword { user } => {
+            match pmacs_vpn::delete_password(&user) {
+                Ok(()) => println!("Password deleted for user: {}", user),
+                Err(e) => {
+                    error!("Failed to delete password: {}", e);
+                    std::process::exit(1);
+                }
+            }
+        }
     }
 
     Ok(())
 }
 
 /// Connect to VPN using native GlobalProtect implementation
-async fn connect_vpn(user: Option<String>) -> Result<(), Box<dyn std::error::Error>> {
+async fn connect_vpn(user: Option<String>, save_password: bool, forget_password: bool) -> Result<(), Box<dyn std::error::Error>> {
     // 1. Load config
     let config_path = std::path::PathBuf::from("pmacs-vpn.toml");
     let config = if config_path.exists() {
@@ -148,10 +171,31 @@ async fn connect_vpn(user: Option<String>) -> Result<(), Box<dyn std::error::Err
             input.trim().to_string()
         });
 
-    // 3. Prompt for password
-    let password = rpassword::prompt_password("Password: ")?;
+    // 3. Handle --forget-password: delete stored password before prompting
+    if forget_password {
+        if let Err(e) = pmacs_vpn::delete_password(&username) {
+            warn!("Could not delete stored password: {}", e);
+        } else {
+            info!("Deleted stored password for {}", username);
+        }
+    }
 
-    // 4. Auth flow
+    // 4. Get password (from keychain or prompt)
+    let password = if !forget_password {
+        // Try to get stored password first
+        match pmacs_vpn::get_password(&username) {
+            Some(stored) => {
+                info!("Using stored password for {}", username);
+                stored
+            }
+            None => rpassword::prompt_password("Password: ")?,
+        }
+    } else {
+        // --forget-password was passed, always prompt
+        rpassword::prompt_password("Password: ")?
+    };
+
+    // 5. Auth flow
     println!("Authenticating...");
     let prelogin = gp::auth::prelogin(&config.vpn.gateway).await?;
     info!("Auth method: {:?}", prelogin.auth_method);
@@ -167,7 +211,7 @@ async fn connect_vpn(user: Option<String>) -> Result<(), Box<dyn std::error::Err
         tunnel_config.internal_ip, tunnel_config.mtu
     );
 
-    // 5. Create tunnel
+    // 6. Create tunnel
     println!("Establishing tunnel...");
     let mut tunnel = gp::tunnel::SslTunnel::connect(
         &config.vpn.gateway,
@@ -177,7 +221,7 @@ async fn connect_vpn(user: Option<String>) -> Result<(), Box<dyn std::error::Err
     )
     .await?;
 
-    // 6. Prepare state and router
+    // 7. Prepare state and router
     let gateway_ip = tunnel_config.internal_ip.to_string();
     let tun_name = tunnel.tun_name().to_string();
     let internal_ip = tunnel_config.internal_ip;
@@ -188,7 +232,15 @@ async fn connect_vpn(user: Option<String>) -> Result<(), Box<dyn std::error::Err
     println!("TUN device: {}", tun_name);
     println!("Internal IP: {}", internal_ip);
 
-    // 7. Start tunnel in background FIRST, then add routes
+    // 8. Save password if --save-password was passed
+    if save_password {
+        match pmacs_vpn::store_password(&username, &password) {
+            Ok(()) => info!("Password stored for {}", username),
+            Err(e) => warn!("Failed to store password: {}", e),
+        }
+    }
+
+    // 9. Start tunnel in background FIRST, then add routes
     // This is critical: DNS queries need the tunnel running to forward packets!
     let tunnel_handle = tokio::spawn(async move {
         tunnel.run().await
@@ -197,7 +249,7 @@ async fn connect_vpn(user: Option<String>) -> Result<(), Box<dyn std::error::Err
     // Give the tunnel a moment to start processing packets
     tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
 
-    // 8. Now add routes (the tunnel is running and can forward DNS queries)
+    // 10. Now add routes (the tunnel is running and can forward DNS queries)
     println!("Adding routes...");
     // Use interface-aware routing for proper Windows TUN support
     let router = VpnRouter::with_interface(gateway_ip, tun_name.clone())?;
@@ -256,16 +308,16 @@ async fn connect_vpn(user: Option<String>) -> Result<(), Box<dyn std::error::Err
         }
     }
 
-    // 9. Update hosts file
+    // 11. Update hosts file
     let hosts_mgr = HostsManager::new();
     hosts_mgr.add_entries(&hosts_map)?;
 
-    // 10. Save state for cleanup
+    // 12. Save state for cleanup
     state.save()?;
 
     println!("Routes configured. VPN is ready.");
 
-    // 11. Wait for tunnel completion or Ctrl+C
+    // 13. Wait for tunnel completion or Ctrl+C
     let result = tokio::select! {
         result = tunnel_handle => {
             match result {
@@ -280,7 +332,7 @@ async fn connect_vpn(user: Option<String>) -> Result<(), Box<dyn std::error::Err
         }
     };
 
-    // 12. Cleanup
+    // 14. Cleanup
     cleanup_vpn(&state).await?;
 
     result
