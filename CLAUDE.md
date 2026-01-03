@@ -15,7 +15,7 @@ Toolkit for streamlined PMACS cluster access via split-tunnel VPN.
 **Native GlobalProtect implementation** - no OpenConnect dependency.
 
 - Direct GlobalProtect protocol (SSL tunnel mode)
-- Cross-platform TUN device via `tun` crate (0.6)
+- Cross-platform TUN device via `tun` crate (0.8, async)
 - Split-tunnel routing for specified hosts only
 - DUO MFA support (server-side RADIUS, we just send "push")
 - TLS via rustls (ring crypto backend, no cmake required)
@@ -35,30 +35,54 @@ Toolkit for streamlined PMACS cluster access via split-tunnel VPN.
 
 ```bash
 # Connect (prompts for password, sends DUO push)
-pmacs-vpn connect -u USERNAME
+pmacs-vpn connect
 
 # Check status
 pmacs-vpn status
 
-# Disconnect
+# Disconnect (Ctrl+C or separate command)
 pmacs-vpn disconnect
+```
+
+## Configuration
+
+Create `pmacs-vpn.toml` in working directory:
+
+```toml
+[vpn]
+gateway = "psomvpn.uphs.upenn.edu"
+protocol = "gp"
+username = "yjk"  # Optional, prompts if not set
+
+hosts = [
+    "prometheus.pmacs.upenn.edu",
+]
+```
+
+Or generate default config:
+```bash
+pmacs-vpn init
 ```
 
 ## Current Status
 
-**Implementation Complete - Ready for Testing**
+**Working on Windows** (2026-01-03)
 
 - [x] Rust project scaffold with CLI
 - [x] Platform routing managers (mac/linux/windows)
 - [x] Hosts file management
 - [x] State persistence
 - [x] Native GlobalProtect auth module
-- [x] SSL tunnel implementation
-- [x] TUN device integration
-- [x] CLI wiring (connect/disconnect)
-- [x] 54 unit tests passing
+- [x] SSL tunnel implementation (async TUN I/O)
+- [x] TUN device integration (wintun)
+- [x] CLI wiring (connect/disconnect/status)
+- [x] 62 unit tests passing
 - [x] Clippy clean (no warnings)
-- [ ] **Integration testing with real VPN** ← NEXT
+- [x] **Windows integration tested - SSH to prometheus works!**
+- [ ] macOS testing
+- [ ] Linux testing
+
+See [TODO.md](TODO.md) for improvement roadmap.
 
 ## Architecture
 

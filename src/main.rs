@@ -136,15 +136,17 @@ async fn connect_vpn(user: Option<String>) -> Result<(), Box<dyn std::error::Err
         pmacs_vpn::Config::default()
     };
 
-    // 2. Get username (from arg or prompt)
-    let username = user.unwrap_or_else(|| {
-        print!("Username: ");
-        use std::io::Write;
-        std::io::stdout().flush().unwrap();
-        let mut input = String::new();
-        std::io::stdin().read_line(&mut input).unwrap();
-        input.trim().to_string()
-    });
+    // 2. Get username (from arg, config, or prompt)
+    let username = user
+        .or_else(|| config.vpn.username.clone())
+        .unwrap_or_else(|| {
+            print!("Username: ");
+            use std::io::Write;
+            std::io::stdout().flush().unwrap();
+            let mut input = String::new();
+            std::io::stdin().read_line(&mut input).unwrap();
+            input.trim().to_string()
+        });
 
     // 3. Prompt for password
     let password = rpassword::prompt_password("Password: ")?;
