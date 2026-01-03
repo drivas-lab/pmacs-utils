@@ -114,13 +114,105 @@ GET /ssl-tunnel-connect.sslvpn?user=yjk&authcookie=<cookie>
 
 ## Current Status
 
-**Tunnel established successfully!** Remaining issues:
+**Tunnel established successfully!**
 
-1. **DNS resolution for VPN hosts** - Need to configure system DNS or use VPN DNS servers
-2. **State directory on Windows** - `HOME` env var not set, need Windows-appropriate path
+### Fixed (2026-01-03)
+- ✅ VPN DNS resolution - Routes now resolve via VPN's DNS servers (128.91.22.200, 172.16.50.10)
+- ✅ Direct IP routing - `add_ip_route()` method for testing without DNS
+- ✅ State directory on Windows - Uses `USERPROFILE` fallback
+
+### Ready to Test
+- [ ] Full connection with SSH to prometheus
+- [ ] Verify packet flow through tunnel
 
 ## Reference
 
 - [GP Protocol Doc](https://github.com/dlenski/openconnect/blob/master/PAN_GlobalProtect_protocol_doc.md)
 - [gpclient source](https://github.com/yuezk/GlobalProtect-openconnect)
 - gpclient's `gp_params.rs` shows all required parameters
+
+---
+
+## Test Procedure
+
+### Prerequisites
+1. Admin/elevated terminal (for TUN device and routes)
+2. PMACS VPN credentials
+3. Phone with DUO app for MFA
+
+### Build
+```powershell
+cd C:\drivaslab\pmacs-utils
+cargo build --release
+```
+
+### Test Steps
+
+#### 1. Connect with Verbose Logging
+```powershell
+# Run as Administrator
+.\target\release\pmacs-vpn.exe -v connect -u YOUR_USERNAME
+```
+
+**Expected output:**
+```
+Authenticating...
+Auth method: Password
+Logging in (check phone for DUO push if prompted)...
+Login successful: YOUR_USERNAME
+Getting tunnel configuration...
+Tunnel config: IP=10.x.x.x MTU=1400
+Establishing tunnel...
+START_TUNNEL received
+Adding routes...
+  Using VPN DNS: 128.91.22.200, 172.16.50.10
+  Added route: prometheus.pmacs.upenn.edu -> 172.16.38.40
+Connected! Press Ctrl+C to disconnect.
+TUN device: wintun
+Internal IP: 10.x.x.x
+```
+
+#### 2. Verify Route (in another terminal)
+```powershell
+# Check route exists
+route print | findstr "prometheus"
+# or
+route print | findstr "172.16"
+```
+
+#### 3. Test SSH Connection
+```powershell
+# In another terminal while VPN is connected
+ssh prometheus.pmacs.upenn.edu
+# or if DNS still fails, try direct IP:
+ssh 172.16.38.40
+```
+
+#### 4. Debug: Check Packet Flow
+If SSH hangs, check tunnel logs for packet activity:
+- `TUN read X bytes` = outgoing packets
+- `Gateway read X bytes` = incoming packets
+- `Sending keepalive` = tunnel maintenance
+
+#### 5. Disconnect
+Press Ctrl+C in the VPN terminal, or run:
+```powershell
+.\target\release\pmacs-vpn.exe disconnect
+```
+
+### Troubleshooting
+
+| Symptom | Likely Cause | Fix |
+|---------|--------------|-----|
+| "DNS resolution failed" | VPN DNS unreachable | Check tunnel is up, try direct IP |
+| "Failed to add route" | Not running as admin | Run terminal as Administrator |
+| SSH hangs | Route missing or packets not flowing | Check `route print`, verify TUN activity |
+| "Invalid user name" | Username not in tunnel request | Already fixed in code |
+| Empty 200 response | Missing `jnlpReady` param | Already fixed in code |
+
+### Debug Mode
+For maximum logging:
+```powershell
+$env:RUST_LOG="debug"
+.\target\release\pmacs-vpn.exe -v connect -u YOUR_USERNAME
+```

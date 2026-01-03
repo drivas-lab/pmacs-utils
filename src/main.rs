@@ -2,7 +2,7 @@ use clap::{Parser, Subcommand};
 use pmacs_vpn::gp;
 use pmacs_vpn::vpn::routing::VpnRouter;
 use pmacs_vpn::vpn::hosts::HostsManager;
-use tracing::{error, info, Level};
+use tracing::{error, info, warn, Level};
 use tracing_subscriber::FmtSubscriber;
 
 #[derive(Parser)]
@@ -175,46 +175,102 @@ async fn connect_vpn(user: Option<String>) -> Result<(), Box<dyn std::error::Err
     )
     .await?;
 
-    // 6. Add routes for configured hosts
-    println!("Adding routes...");
+    // 6. Prepare state and router
     let gateway_ip = tunnel_config.internal_ip.to_string();
-    let router = VpnRouter::new(gateway_ip)?;
+    let tun_name = tunnel.tun_name().to_string();
+    let internal_ip = tunnel_config.internal_ip;
+    let dns_servers = tunnel_config.dns_servers.clone();
+    let hosts_to_route = config.hosts.clone();
 
-    let mut state = pmacs_vpn::VpnState::new(
-        tunnel.tun_name().to_string(),
-        tunnel_config.internal_ip,
-    );
+    println!("Connected! Press Ctrl+C to disconnect.");
+    println!("TUN device: {}", tun_name);
+    println!("Internal IP: {}", internal_ip);
+
+    // 7. Start tunnel in background FIRST, then add routes
+    // This is critical: DNS queries need the tunnel running to forward packets!
+    let tunnel_handle = tokio::spawn(async move {
+        tunnel.run().await
+    });
+
+    // Give the tunnel a moment to start processing packets
+    tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+
+    // 8. Now add routes (the tunnel is running and can forward DNS queries)
+    println!("Adding routes...");
+    // Use interface-aware routing for proper Windows TUN support
+    let router = VpnRouter::with_interface(gateway_ip, tun_name.clone())?;
+
+    let mut state = pmacs_vpn::VpnState::new(tun_name, internal_ip);
+
+    // First add routes to VPN DNS servers
+    if !dns_servers.is_empty() {
+        info!("VPN DNS servers: {:?}", dns_servers);
+        println!("  Adding routes to VPN DNS servers first...");
+        for dns_server in &dns_servers {
+            let dns_ip = dns_server.to_string();
+            match router.add_ip_route(&dns_ip) {
+                Ok(_) => {
+                    info!("Added route to DNS server: {}", dns_ip);
+                    println!("    Route to DNS: {}", dns_ip);
+                }
+                Err(e) => {
+                    warn!("Failed to add route to DNS {}: {}", dns_ip, e);
+                }
+            }
+        }
+        println!(
+            "  Using VPN DNS: {}",
+            dns_servers
+                .iter()
+                .map(|ip| ip.to_string())
+                .collect::<Vec<_>>()
+                .join(", ")
+        );
+    } else {
+        warn!("No VPN DNS servers provided, using system DNS");
+    }
 
     let mut hosts_map = std::collections::HashMap::new();
-    for host in &config.hosts {
-        match router.add_host_route(host) {
+    for host in &hosts_to_route {
+        // Try VPN DNS first, fall back to system DNS
+        let result = if !dns_servers.is_empty() {
+            router.add_host_route_with_dns(host, &dns_servers)
+        } else {
+            router.add_host_route(host)
+        };
+
+        match result {
             Ok(ip) => {
                 state.add_route(host.clone(), ip);
                 state.add_hosts_entry(host.clone(), ip);
                 hosts_map.insert(host.clone(), ip);
-                println!("  Added route for {} -> {}", host, ip);
+                println!("  Added route: {} -> {}", host, ip);
             }
             Err(e) => {
                 error!("Failed to add route for {}: {}", host, e);
+                println!("  WARN: Could not route {} - {}", host, e);
+                println!("        Try: pmacs-vpn connect -v for more details");
             }
         }
     }
 
-    // 7. Update hosts file
+    // 9. Update hosts file
     let hosts_mgr = HostsManager::new();
     hosts_mgr.add_entries(&hosts_map)?;
 
-    // 8. Save state for cleanup
+    // 10. Save state for cleanup
     state.save()?;
 
-    // 9. Run tunnel with signal handling
-    println!("Connected! Press Ctrl+C to disconnect.");
-    println!("TUN device: {}", tunnel.tun_name());
-    println!("Internal IP: {}", tunnel_config.internal_ip);
+    println!("Routes configured. VPN is ready.");
 
+    // 11. Wait for tunnel completion or Ctrl+C
     let result = tokio::select! {
-        result = tunnel.run() => {
-            result.map_err(|e| Box::new(e) as Box<dyn std::error::Error>)
+        result = tunnel_handle => {
+            match result {
+                Ok(Ok(())) => Ok(()),
+                Ok(Err(e)) => Err(Box::new(e) as Box<dyn std::error::Error>),
+                Err(e) => Err(Box::new(e) as Box<dyn std::error::Error>),
+            }
         }
         _ = tokio::signal::ctrl_c() => {
             println!("\nDisconnecting...");
@@ -222,7 +278,7 @@ async fn connect_vpn(user: Option<String>) -> Result<(), Box<dyn std::error::Err
         }
     };
 
-    // 10. Cleanup
+    // 12. Cleanup
     cleanup_vpn(&state).await?;
 
     result

@@ -52,6 +52,41 @@ pub fn get_routing_manager() -> Result<Box<dyn RoutingManager>, PlatformError> {
     }
 }
 
+/// Get a routing manager bound to a specific interface (for TUN devices)
+///
+/// On Windows, this looks up the interface index for proper routing.
+/// On other platforms, this is currently equivalent to get_routing_manager().
+pub fn get_routing_manager_for_interface(
+    interface_name: &str,
+) -> Result<Box<dyn RoutingManager>, PlatformError> {
+    #[cfg(target_os = "macos")]
+    {
+        // TODO: macOS should use -interface flag
+        let _ = interface_name;
+        Ok(Box::new(mac::MacRoutingManager::new()))
+    }
+
+    #[cfg(target_os = "linux")]
+    {
+        // TODO: Linux should use dev flag
+        let _ = interface_name;
+        Ok(Box::new(linux::LinuxRoutingManager::new()))
+    }
+
+    #[cfg(target_os = "windows")]
+    {
+        Ok(Box::new(windows::WindowsRoutingManager::with_interface(
+            interface_name,
+        )))
+    }
+
+    #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
+    {
+        let _ = interface_name;
+        Err(PlatformError::UnsupportedPlatform)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
