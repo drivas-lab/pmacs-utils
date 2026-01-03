@@ -1,4 +1,7 @@
 use clap::{Parser, Subcommand};
+use pmacs_vpn::gp;
+use pmacs_vpn::vpn::routing::VpnRouter;
+use pmacs_vpn::vpn::hosts::HostsManager;
 use tracing::{error, info, Level};
 use tracing_subscriber::FmtSubscriber;
 
@@ -59,17 +62,23 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     match cli.command {
         Commands::Connect { user } => {
             info!("Connecting to PMACS VPN...");
-            if let Some(username) = user {
-                info!("Using username: {}", username);
+            match connect_vpn(user).await {
+                Ok(()) => info!("VPN connection closed"),
+                Err(e) => {
+                    error!("VPN connection failed: {}", e);
+                    std::process::exit(1);
+                }
             }
-            // TODO: Implement connection logic (spawn OpenConnect)
-            println!("Connect command not yet implemented");
-            println!("For now, use: sudo openconnect psomvpn.uphs.upenn.edu --protocol=gp -u USERNAME -s 'pmacs-vpn script'");
         }
         Commands::Disconnect => {
             info!("Disconnecting from PMACS VPN...");
-            // TODO: Implement disconnect logic (kill OpenConnect, cleanup)
-            println!("Disconnect command not yet implemented");
+            match disconnect_vpn().await {
+                Ok(()) => println!("Disconnected successfully"),
+                Err(e) => {
+                    error!("Disconnect failed: {}", e);
+                    std::process::exit(1);
+                }
+            }
         }
         Commands::Status => {
             info!("Checking VPN status...");
@@ -112,6 +121,143 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
         }
     }
+
+    Ok(())
+}
+
+/// Connect to VPN using native GlobalProtect implementation
+async fn connect_vpn(user: Option<String>) -> Result<(), Box<dyn std::error::Error>> {
+    // 1. Load config
+    let config_path = std::path::PathBuf::from("pmacs-vpn.toml");
+    let config = if config_path.exists() {
+        pmacs_vpn::Config::load(&config_path)?
+    } else {
+        info!("No config file found, using defaults");
+        pmacs_vpn::Config::default()
+    };
+
+    // 2. Get username (from arg or prompt)
+    let username = user.unwrap_or_else(|| {
+        print!("Username: ");
+        use std::io::Write;
+        std::io::stdout().flush().unwrap();
+        let mut input = String::new();
+        std::io::stdin().read_line(&mut input).unwrap();
+        input.trim().to_string()
+    });
+
+    // 3. Prompt for password
+    let password = rpassword::prompt_password("Password: ")?;
+
+    // 4. Auth flow
+    println!("Authenticating...");
+    let prelogin = gp::auth::prelogin(&config.vpn.gateway).await?;
+    info!("Auth method: {:?}", prelogin.auth_method);
+
+    println!("Logging in (check phone for DUO push if prompted)...");
+    let login = gp::auth::login(&config.vpn.gateway, &username, &password, Some("push")).await?;
+    info!("Login successful: {}", login.username);
+
+    println!("Getting tunnel configuration...");
+    let tunnel_config = gp::auth::getconfig(&config.vpn.gateway, &login.auth_cookie, None).await?;
+    info!(
+        "Tunnel config: IP={} MTU={}",
+        tunnel_config.internal_ip, tunnel_config.mtu
+    );
+
+    // 5. Create tunnel
+    println!("Establishing tunnel...");
+    let mut tunnel = gp::tunnel::SslTunnel::connect(
+        &config.vpn.gateway,
+        &login.auth_cookie,
+        &tunnel_config,
+    )
+    .await?;
+
+    // 6. Add routes for configured hosts
+    println!("Adding routes...");
+    let gateway_ip = tunnel_config.internal_ip.to_string();
+    let router = VpnRouter::new(gateway_ip)?;
+
+    let mut state = pmacs_vpn::VpnState::new(
+        tunnel.tun_name().to_string(),
+        tunnel_config.internal_ip,
+    );
+
+    let mut hosts_map = std::collections::HashMap::new();
+    for host in &config.hosts {
+        match router.add_host_route(host) {
+            Ok(ip) => {
+                state.add_route(host.clone(), ip);
+                state.add_hosts_entry(host.clone(), ip);
+                hosts_map.insert(host.clone(), ip);
+                println!("  Added route for {} -> {}", host, ip);
+            }
+            Err(e) => {
+                error!("Failed to add route for {}: {}", host, e);
+            }
+        }
+    }
+
+    // 7. Update hosts file
+    let hosts_mgr = HostsManager::new();
+    hosts_mgr.add_entries(&hosts_map)?;
+
+    // 8. Save state for cleanup
+    state.save()?;
+
+    // 9. Run tunnel with signal handling
+    println!("Connected! Press Ctrl+C to disconnect.");
+    println!("TUN device: {}", tunnel.tun_name());
+    println!("Internal IP: {}", tunnel_config.internal_ip);
+
+    let result = tokio::select! {
+        result = tunnel.run() => {
+            result.map_err(|e| Box::new(e) as Box<dyn std::error::Error>)
+        }
+        _ = tokio::signal::ctrl_c() => {
+            println!("\nDisconnecting...");
+            Ok(())
+        }
+    };
+
+    // 10. Cleanup
+    cleanup_vpn(&state).await?;
+
+    result
+}
+
+/// Disconnect from VPN and clean up
+async fn disconnect_vpn() -> Result<(), Box<dyn std::error::Error>> {
+    if let Some(state) = pmacs_vpn::VpnState::load()? {
+        cleanup_vpn(&state).await?;
+        println!("Disconnected successfully");
+    } else {
+        println!("VPN is not connected");
+    }
+    Ok(())
+}
+
+/// Clean up routes, hosts, and state
+async fn cleanup_vpn(state: &pmacs_vpn::VpnState) -> Result<(), Box<dyn std::error::Error>> {
+    info!("Cleaning up VPN state...");
+
+    // Remove hosts entries
+    let hosts_mgr = HostsManager::new();
+    if let Err(e) = hosts_mgr.remove_entries() {
+        error!("Failed to remove hosts entries: {}", e);
+    }
+
+    // Remove routes
+    let router = VpnRouter::new(state.gateway.to_string())?;
+    for route in &state.routes {
+        if let Err(e) = router.remove_host_route(&route.hostname) {
+            error!("Failed to remove route for {}: {}", route.hostname, e);
+        }
+    }
+
+    // Delete state file
+    pmacs_vpn::VpnState::delete()?;
 
     Ok(())
 }

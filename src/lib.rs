@@ -1,16 +1,17 @@
 //! PMACS VPN - Split-tunnel VPN toolkit for PMACS cluster access
 //!
 //! This crate provides split-tunnel VPN functionality for accessing PMACS
-//! cluster resources. It integrates with OpenConnect to route only specified
-//! hosts through the VPN tunnel while keeping other traffic on the normal
-//! network.
+//! cluster resources using a native GlobalProtect implementation. Routes only
+//! specified hosts through the VPN tunnel while keeping other traffic on the
+//! normal network.
 //!
 //! # Architecture
 //!
 //! - `config`: Configuration file handling (TOML)
+//! - `gp`: Native GlobalProtect protocol implementation
 //! - `platform`: Cross-platform routing (macOS, Linux, Windows)
 //! - `vpn`: VPN routing and hosts file management
-//! - `openconnect`: OpenConnect script integration
+//! - `openconnect`: Legacy OpenConnect script integration (deprecated)
 //! - `state`: Persistent state for crash recovery
 //!
 //! # Usage
@@ -22,6 +23,7 @@
 //! ```
 
 pub mod config;
+pub mod gp;
 pub mod openconnect;
 pub mod platform;
 pub mod state;

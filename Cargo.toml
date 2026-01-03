@@ -16,6 +16,26 @@ thiserror = "1"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
+# HTTP client for GlobalProtect auth
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls-webpki-roots", "cookies"] }
+
+# XML parsing for GlobalProtect responses
+quick-xml = { version = "0.37", features = ["serialize"] }
+
+# TUN device (cross-platform)
+tun = { version = "0.6" }
+
+# TLS for SSL tunnel
+tokio-rustls = { version = "0.26", default-features = false, features = ["ring"] }
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
+webpki-roots = "0.26"
+
+# Hostname
+hostname = "0.4"
+
+# Password input
+rpassword = "7"
+
 [target.'cfg(unix)'.dependencies]
 nix = { version = "0.29", features = ["net", "process", "user"] }
 
