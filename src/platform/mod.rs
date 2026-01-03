@@ -52,6 +52,12 @@ pub fn get_routing_manager() -> Result<Box<dyn RoutingManager>, PlatformError> {
     }
 }
 
+/// Get the interface index for a given name (Windows only)
+#[cfg(target_os = "windows")]
+pub fn get_interface_index(name: &str) -> Option<u32> {
+    windows::get_interface_index(name)
+}
+
 /// Get a routing manager bound to a specific interface (for TUN devices)
 ///
 /// On Windows, this looks up the interface index for proper routing.

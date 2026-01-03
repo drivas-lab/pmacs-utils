@@ -28,6 +28,9 @@ pub enum RoutingError {
 pub struct VpnRouter {
     gateway: String,
     interface_name: Option<String>,
+    /// Interface index for binding sockets (Windows)
+    #[cfg(windows)]
+    interface_index: Option<u32>,
 }
 
 impl VpnRouter {
@@ -36,6 +39,8 @@ impl VpnRouter {
         Ok(Self {
             gateway,
             interface_name: None,
+            #[cfg(windows)]
+            interface_index: None,
         })
     }
 
@@ -45,9 +50,15 @@ impl VpnRouter {
             "Creating VpnRouter with gateway: {} interface: {}",
             gateway, interface_name
         );
+
+        #[cfg(windows)]
+        let interface_index = crate::platform::get_interface_index(&interface_name);
+
         Ok(Self {
             gateway,
             interface_name: Some(interface_name),
+            #[cfg(windows)]
+            interface_index,
         })
     }
 
@@ -90,6 +101,8 @@ impl VpnRouter {
     ///
     /// Sends a UDP DNS query directly to the specified DNS servers.
     /// This bypasses system DNS configuration.
+    ///
+    /// On Windows, binds the socket to the TUN interface using IP_UNICAST_IF.
     pub fn resolve_with_dns(
         &self,
         hostname: &str,
@@ -100,9 +113,14 @@ impl VpnRouter {
             return self.resolve_host(hostname);
         }
 
+        #[cfg(windows)]
+        let if_index = self.interface_index;
+        #[cfg(not(windows))]
+        let if_index: Option<u32> = None;
+
         debug!(
-            "Resolving {} via VPN DNS servers: {:?}",
-            hostname, dns_servers
+            "Resolving {} via VPN DNS servers: {:?} (interface: {:?})",
+            hostname, dns_servers, if_index
         );
 
         // Build DNS query packet
@@ -113,7 +131,7 @@ impl VpnRouter {
 
             let server_addr = SocketAddr::new(*dns_server, 53);
 
-            match query_dns_server(&query, server_addr) {
+            match query_dns_server(&query, server_addr, if_index) {
                 Ok(ip) => {
                     info!("VPN DNS resolved {} -> {} (via {})", hostname, ip, dns_server);
                     return Ok(IpAddr::V4(ip));
@@ -225,9 +243,21 @@ fn build_dns_query(hostname: &str) -> Vec<u8> {
 }
 
 /// Send DNS query to server and parse response
-fn query_dns_server(query: &[u8], server: SocketAddr) -> Result<Ipv4Addr, String> {
-    // Create UDP socket
+///
+/// On Windows, if `interface_index` is provided, binds the socket to that
+/// interface using IP_UNICAST_IF to ensure traffic goes through the TUN device.
+fn query_dns_server(
+    query: &[u8],
+    server: SocketAddr,
+    interface_index: Option<u32>,
+) -> Result<Ipv4Addr, String> {
     let socket = UdpSocket::bind("0.0.0.0:0").map_err(|e| format!("bind failed: {}", e))?;
+
+    // On Windows, bind socket to specific interface using IP_UNICAST_IF
+    #[cfg(windows)]
+    if let Some(if_index) = interface_index {
+        bind_socket_to_interface(&socket, if_index)?;
+    }
 
     socket
         .set_read_timeout(Some(Duration::from_secs(5)))
@@ -318,6 +348,42 @@ fn query_dns_server(query: &[u8], server: SocketAddr) -> Result<Ipv4Addr, String
     }
 
     Err(format!("unexpected answer type: {} length: {}", atype, rdlength))
+}
+
+/// Bind a socket to a specific network interface on Windows using IP_UNICAST_IF
+///
+/// This ensures UDP packets are sent through the TUN interface rather than
+/// the default network adapter.
+#[cfg(windows)]
+fn bind_socket_to_interface(socket: &UdpSocket, interface_index: u32) -> Result<(), String> {
+    use std::os::windows::io::AsRawSocket;
+
+    // IP_UNICAST_IF = 31 (from WinSock2.h)
+    // IPPROTO_IP = 0
+    const IPPROTO_IP: i32 = 0;
+    const IP_UNICAST_IF: i32 = 31;
+
+    let raw_socket = socket.as_raw_socket();
+
+    // The interface index needs to be in network byte order (big endian)
+    let if_index_be = interface_index.to_be();
+
+    let result = unsafe {
+        windows::Win32::Networking::WinSock::setsockopt(
+            windows::Win32::Networking::WinSock::SOCKET(raw_socket as usize),
+            IPPROTO_IP,
+            IP_UNICAST_IF,
+            Some(&if_index_be.to_ne_bytes()),
+        )
+    };
+
+    if result != 0 {
+        let error = std::io::Error::last_os_error();
+        return Err(format!("setsockopt IP_UNICAST_IF failed: {}", error));
+    }
+
+    debug!("Bound socket to interface index {} via IP_UNICAST_IF", interface_index);
+    Ok(())
 }
 
 #[cfg(test)]
