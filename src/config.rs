@@ -22,6 +22,9 @@ pub struct Config {
 pub struct VpnConfig {
     pub gateway: String,
     pub protocol: String,
+    /// Username for VPN authentication (optional, will prompt if not set)
+    #[serde(default)]
+    pub username: Option<String>,
 }
 
 impl Default for Config {
@@ -30,6 +33,7 @@ impl Default for Config {
             vpn: VpnConfig {
                 gateway: "psomvpn.uphs.upenn.edu".to_string(),
                 protocol: "gp".to_string(),
+                username: None,
             },
             hosts: vec!["prometheus.pmacs.upenn.edu".to_string()],
         }
@@ -87,6 +91,7 @@ mod tests {
             vpn: VpnConfig {
                 gateway: "custom.vpn.example.com".to_string(),
                 protocol: "anyconnect".to_string(),
+                username: Some("testuser".to_string()),
             },
             hosts: vec![
                 "host1.example.com".to_string(),
