@@ -38,6 +38,10 @@ Native GlobalProtect client **working on Windows**:
 - [x] "Using cached password" feedback
 - [x] `tray.ps1` script with auto-elevation
 - [x] Improved connect.ps1 with status check
+- [x] Auto-connect on tray startup (if credentials cached)
+- [x] Toast notifications (DUO push, connected, disconnected)
+- [x] "Start with Windows" menu item (registry-based, visible in Task Manager)
+- [x] Setup notification for new users without credentials
 
 ## Next Priority
 
@@ -73,12 +77,7 @@ Translate system errors to user-friendly messages:
 
 ## Nice to Have
 
-### 4. Auto-Connect on Startup
-- Windows: Scheduled task
-- macOS: LaunchAgent
-- Linux: systemd user service
-
-### 5. Multiple Gateway Profiles
+### 4. Multiple Gateway Profiles
 ```toml
 [profiles.pmacs]
 gateway = "psomvpn.uphs.upenn.edu"
@@ -87,9 +86,8 @@ gateway = "psomvpn.uphs.upenn.edu"
 gateway = "other.example.com"
 ```
 
-### 6. Tray Notifications
-- Show notification on connect/disconnect
-- Warn before session expiry
+### 5. Session Expiry Warning
+- Warn before 16hr session expires (notification)
 
 ## Technical Debt
 

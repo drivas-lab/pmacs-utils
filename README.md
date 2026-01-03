@@ -93,23 +93,35 @@ pmacs-vpn disconnect
 
 ## System Tray (Windows)
 
-For GUI-based control, use the system tray:
+The recommended way to use the VPN:
 
 ```bash
 pmacs-vpn tray
 ```
 
+Features:
+- **Auto-connects** if password is cached
+- **Toast notifications** for DUO push and connection status
+- **"Start with Windows"** option in menu (shows in Task Manager)
+- Runs completely hidden (no terminal window)
+
 Right-click the tray icon for Connect/Disconnect/Exit.
 
-**Note:** Tray mode requires password to be cached first. Run `pmacs-vpn connect --save-password` before using the tray.
+**First time:** Run `pmacs-vpn connect --save-password` once to cache credentials.
 
-## Windows Shortcuts
+## Windows Desktop Shortcuts
 
-Double-click shortcuts in `scripts/`:
-- `tray.ps1` — Launch system tray (auto-elevates)
-- `connect.ps1` — Connect with auto-elevation
+Create desktop shortcuts for easy access:
 
-See [docs/windows-shortcut.md](docs/windows-shortcut.md) for desktop shortcut setup.
+```powershell
+# Run from project directory
+.\scripts\create-shortcuts.ps1
+```
+
+This creates:
+- **PMACS VPN Tray** — Main shortcut (recommended)
+- **PMACS VPN Connect** — CLI connect
+- **PMACS VPN Disconnect** — CLI disconnect
 
 ## Configuration
 

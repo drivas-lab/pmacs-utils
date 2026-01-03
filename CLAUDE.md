@@ -74,8 +74,11 @@ pmacs-vpn init
 - [x] Credential caching (Windows Credential Manager)
 - [x] Daemon mode (--daemon flag)
 - [x] System tray GUI (pmacs-vpn tray)
+- [x] Auto-connect on tray startup (if credentials cached)
+- [x] Toast notifications (DUO push, connected, disconnected)
+- [x] "Start with Windows" (registry, visible in Task Manager)
 - [x] Upfront admin privilege check
-- [x] Desktop shortcut workflow (tray.ps1, connect.ps1)
+- [x] Desktop shortcut workflow
 - [x] 70 unit tests, clippy clean
 - [x] **SSH to prometheus works!**
 - [ ] macOS testing

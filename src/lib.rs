@@ -25,8 +25,10 @@
 pub mod config;
 pub mod credentials;
 pub mod gp;
+pub mod notifications;
 pub mod openconnect;
 pub mod platform;
+pub mod startup;
 pub mod state;
 pub mod tray;
 pub mod vpn;
