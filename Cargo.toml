@@ -36,6 +36,9 @@ hostname = "0.4"
 # Password input
 rpassword = "7"
 
+# Secure credential storage (Windows Credential Manager, macOS Keychain, Linux Secret Service)
+keyring = { version = "3", features = ["windows-native", "apple-native", "linux-native"] }
+
 [target.'cfg(unix)'.dependencies]
 nix = { version = "0.29", features = ["net", "process", "user"] }
 

@@ -23,6 +23,7 @@
 //! ```
 
 pub mod config;
+pub mod credentials;
 pub mod gp;
 pub mod openconnect;
 pub mod platform;
@@ -30,5 +31,6 @@ pub mod state;
 pub mod vpn;
 
 pub use config::Config;
+pub use credentials::{delete_password, get_password, store_password};
 pub use openconnect::handle_script_mode;
 pub use state::VpnState;
