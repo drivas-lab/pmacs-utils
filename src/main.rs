@@ -466,21 +466,25 @@ async fn spawn_daemon(
     cmd.arg("connect");
     cmd.arg("--_daemon-pid=1");
 
-    // Platform-specific detachment
+    // Set working directory (needed for config file access)
+    if let Ok(cwd) = std::env::current_dir() {
+        cmd.current_dir(cwd);
+    }
+
+    // Platform-specific detachment - redirect stdio to null (no console)
+    {
+        use std::process::Stdio;
+        cmd.stdin(Stdio::null());
+        cmd.stdout(Stdio::null());
+        cmd.stderr(Stdio::null());
+    }
+
     #[cfg(windows)]
     {
         use std::os::windows::process::CommandExt;
         const CREATE_NEW_PROCESS_GROUP: u32 = 0x00000200;
         const DETACHED_PROCESS: u32 = 0x00000008;
         cmd.creation_flags(CREATE_NEW_PROCESS_GROUP | DETACHED_PROCESS);
-    }
-
-    #[cfg(not(windows))]
-    {
-        use std::process::Stdio;
-        cmd.stdin(Stdio::null());
-        cmd.stdout(Stdio::null());
-        cmd.stderr(Stdio::null());
     }
 
     let child = cmd.spawn()?;

@@ -1,35 +1,50 @@
 # Create desktop shortcuts for PMACS VPN
+# Direct exe shortcuts (no PowerShell wrapper - more reliable)
 $desktop = [Environment]::GetFolderPath('Desktop')
-$scriptDir = 'C:\drivaslab\pmacs-utils\scripts'
+$exePath = 'C:\drivaslab\pmacs-utils\target\release\pmacs-vpn.exe'
+$workDir = 'C:\drivaslab\pmacs-utils'
 
 $ws = New-Object -ComObject WScript.Shell
 
-# PMACS VPN Tray
-$shortcut = $ws.CreateShortcut("$desktop\PMACS VPN Tray.lnk")
-$shortcut.TargetPath = 'powershell.exe'
-$shortcut.Arguments = "-ExecutionPolicy Bypass -File `"$scriptDir\tray.ps1`""
-$shortcut.WorkingDirectory = 'C:\drivaslab\pmacs-utils'
-$shortcut.IconLocation = 'shell32.dll,13'
-$shortcut.Save()
-Write-Host "Created: PMACS VPN Tray.lnk"
+# Helper to set "Run as administrator" flag on a shortcut
+function Set-RunAsAdmin($lnkPath) {
+    $bytes = [System.IO.File]::ReadAllBytes($lnkPath)
+    $bytes[21] = $bytes[21] -bor 0x20
+    [System.IO.File]::WriteAllBytes($lnkPath, $bytes)
+}
 
 # PMACS VPN Connect
-$shortcut = $ws.CreateShortcut("$desktop\PMACS VPN Connect.lnk")
-$shortcut.TargetPath = 'powershell.exe'
-$shortcut.Arguments = "-ExecutionPolicy Bypass -File `"$scriptDir\connect.ps1`""
-$shortcut.WorkingDirectory = 'C:\drivaslab\pmacs-utils'
+$lnkPath = "$desktop\PMACS VPN Connect.lnk"
+$shortcut = $ws.CreateShortcut($lnkPath)
+$shortcut.TargetPath = $exePath
+$shortcut.Arguments = 'connect'
+$shortcut.WorkingDirectory = $workDir
 $shortcut.IconLocation = 'shell32.dll,13'
 $shortcut.Save()
+Set-RunAsAdmin $lnkPath
 Write-Host "Created: PMACS VPN Connect.lnk"
 
+# PMACS VPN Tray
+$lnkPath = "$desktop\PMACS VPN Tray.lnk"
+$shortcut = $ws.CreateShortcut($lnkPath)
+$shortcut.TargetPath = $exePath
+$shortcut.Arguments = 'tray'
+$shortcut.WorkingDirectory = $workDir
+$shortcut.IconLocation = 'shell32.dll,13'
+$shortcut.Save()
+Set-RunAsAdmin $lnkPath
+Write-Host "Created: PMACS VPN Tray.lnk"
+
 # PMACS VPN Disconnect
-$shortcut = $ws.CreateShortcut("$desktop\PMACS VPN Disconnect.lnk")
-$shortcut.TargetPath = 'powershell.exe'
-$shortcut.Arguments = "-ExecutionPolicy Bypass -File `"$scriptDir\disconnect.ps1`""
-$shortcut.WorkingDirectory = 'C:\drivaslab\pmacs-utils'
+$lnkPath = "$desktop\PMACS VPN Disconnect.lnk"
+$shortcut = $ws.CreateShortcut($lnkPath)
+$shortcut.TargetPath = $exePath
+$shortcut.Arguments = 'disconnect'
+$shortcut.WorkingDirectory = $workDir
 $shortcut.IconLocation = 'shell32.dll,14'
 $shortcut.Save()
+Set-RunAsAdmin $lnkPath
 Write-Host "Created: PMACS VPN Disconnect.lnk"
 
 Write-Host ""
-Write-Host "Desktop shortcuts created!"
+Write-Host "Desktop shortcuts created (direct exe, Run as Administrator)"

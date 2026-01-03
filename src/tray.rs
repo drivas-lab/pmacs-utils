@@ -6,6 +6,8 @@
 use std::sync::mpsc;
 use tao::event::{Event, StartCause};
 use tao::event_loop::{ControlFlow, EventLoopBuilder};
+#[cfg(target_os = "windows")]
+use tao::platform::windows::EventLoopBuilderExtWindows;
 use tray_icon::menu::{Menu, MenuEvent, MenuItem, PredefinedMenuItem};
 use tray_icon::{TrayIcon, TrayIconBuilder, TrayIconEvent};
 use tracing::{debug, error, info};
@@ -72,6 +74,12 @@ impl TrayApp {
         info!("Starting system tray application");
 
         // Build event loop with custom user events
+        // On Windows, allow running on non-main thread (we're spawned from tokio)
+        #[cfg(target_os = "windows")]
+        let event_loop = EventLoopBuilder::<UserEvent>::with_user_event()
+            .with_any_thread(true)
+            .build();
+        #[cfg(not(target_os = "windows"))]
         let event_loop = EventLoopBuilder::<UserEvent>::with_user_event().build();
         let proxy = event_loop.create_proxy();
 
