@@ -6,9 +6,11 @@
 //! ```
 //!
 //! - Magic: 0x1a2b3c4d
-//! - Ethertype: 0x0800 (IPv4) or 0x86dd (IPv6)
+//! - Ethertype: 0x0800 (IPv4) or 0x86dd (IPv6), 0x0000 for keepalive
 //! - Length: payload size in bytes, big-endian (0 = keepalive)
-//! - Type: 8 zero bytes for data packets
+//! - Type: 0x01000000 00000000 for data, 0x00000000 00000000 for keepalive
+//!
+//! Reference: OpenConnect gpst.c
 
 use thiserror::Error;
 
@@ -103,8 +105,15 @@ impl GpPacket {
         let len = self.payload.len() as u16;
         frame.extend_from_slice(&len.to_be_bytes());
 
-        // Type (8 zero bytes for data packets)
-        frame.extend_from_slice(&[0u8; 8]);
+        // Type field (bytes 8-15):
+        // - Data packets: 0x01 0x00 0x00 0x00 0x00 0x00 0x00 0x00
+        // - Keepalives:   0x00 0x00 0x00 0x00 0x00 0x00 0x00 0x00
+        // Per OpenConnect gpst.c: "Always \x01\0\0\0\0\0\0\0" for data
+        if self.payload.is_empty() {
+            frame.extend_from_slice(&[0u8; 8]);
+        } else {
+            frame.extend_from_slice(&[0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00]);
+        }
 
         // Payload
         frame.extend_from_slice(&self.payload);
@@ -176,6 +185,10 @@ mod tests {
             payload.len() as u16
         );
 
+        // Check type field: data packets must have 0x01 at byte 8
+        assert_eq!(encoded[8], 0x01, "Data packets must have type byte 0x01");
+        assert_eq!(&encoded[9..16], &[0u8; 7], "Remaining type bytes must be zero");
+
         // Decode
         let decoded = GpPacket::decode(&encoded).unwrap();
         assert_eq!(decoded, packet);
@@ -204,6 +217,9 @@ mod tests {
 
         // Length should be 0
         assert_eq!(u16::from_be_bytes([encoded[6], encoded[7]]), 0);
+
+        // Type field should be all zeros for keepalive
+        assert_eq!(&encoded[8..16], &[0u8; 8], "Keepalive type bytes must be zero");
 
         let decoded = GpPacket::decode(&encoded).unwrap();
         assert!(decoded.is_keepalive());
