@@ -66,3 +66,79 @@ impl VpnRouter {
         Ok(())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::platform::PlatformError;
+
+    #[test]
+    fn test_routing_error_display() {
+        let err = RoutingError::NoAddressFound("test.example.com".to_string());
+        assert_eq!(
+            err.to_string(),
+            "No IP addresses found for host: test.example.com"
+        );
+
+        let platform_err = PlatformError::AddRouteError("permission denied".to_string());
+        let err = RoutingError::PlatformError(platform_err);
+        assert!(err.to_string().contains("Platform error"));
+    }
+
+    #[test]
+    fn test_vpn_router_creation() {
+        let router = VpnRouter::new("10.0.0.1".to_string());
+        assert!(router.is_ok());
+
+        let router = router.unwrap();
+        assert_eq!(router.gateway, "10.0.0.1");
+    }
+
+    #[test]
+    fn test_resolve_known_host() {
+        // This test requires network access
+        let router = VpnRouter::new("10.0.0.1".to_string()).unwrap();
+
+        // Use localhost which should always resolve
+        let result = router.resolve_host("localhost");
+        // localhost might not be configured on all systems, so we just check it doesn't panic
+        // On most systems it should resolve to 127.0.0.1 or ::1
+        if let Ok(ip) = result {
+            let ip_str = ip.to_string();
+            assert!(ip_str == "127.0.0.1" || ip_str == "::1");
+        }
+    }
+
+    #[test]
+    fn test_resolve_nonexistent_host() {
+        let router = VpnRouter::new("10.0.0.1".to_string()).unwrap();
+
+        // Use a definitely nonexistent domain
+        let result = router.resolve_host("this-domain-definitely-does-not-exist-12345.invalid");
+        assert!(result.is_err());
+
+        if let Err(RoutingError::DnsError { host, .. }) = result {
+            assert!(host.contains("this-domain-definitely-does-not-exist"));
+        }
+    }
+
+    #[test]
+    fn test_routing_error_from_platform_error() {
+        let platform_err = PlatformError::DeleteRouteError("route not found".to_string());
+        let routing_err: RoutingError = platform_err.into();
+
+        match routing_err {
+            RoutingError::PlatformError(e) => {
+                assert!(e.to_string().contains("route not found"));
+            }
+            _ => panic!("Expected PlatformError variant"),
+        }
+    }
+
+    #[test]
+    fn test_vpn_router_gateway_stored() {
+        let gateway = "192.168.1.1".to_string();
+        let router = VpnRouter::new(gateway.clone()).unwrap();
+        assert_eq!(router.gateway, gateway);
+    }
+}
