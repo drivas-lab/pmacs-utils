@@ -1,0 +1,308 @@
+//! System tray integration for pmacs-vpn
+//!
+//! Provides a system tray icon with context menu for VPN control.
+//! Uses the `tray-icon` crate with `tao` for the event loop.
+
+use std::sync::mpsc;
+use tao::event::{Event, StartCause};
+use tao::event_loop::{ControlFlow, EventLoopBuilder};
+use tray_icon::menu::{Menu, MenuEvent, MenuItem, PredefinedMenuItem};
+use tray_icon::{TrayIcon, TrayIconBuilder, TrayIconEvent};
+use tracing::{debug, error, info};
+
+/// Commands that can be sent from the tray to the VPN controller
+#[derive(Debug, Clone)]
+pub enum TrayCommand {
+    /// Start VPN connection
+    Connect,
+    /// Stop VPN connection
+    Disconnect,
+    /// Show status window (future)
+    ShowStatus,
+    /// Exit the application
+    Exit,
+}
+
+/// VPN state updates sent from the VPN controller to the tray
+#[derive(Debug, Clone, PartialEq)]
+pub enum VpnStatus {
+    Disconnected,
+    Connecting,
+    Connected { ip: String },
+    Disconnecting,
+    Error(String),
+}
+
+/// Custom event for the tray event loop
+enum UserEvent {
+    TrayIcon(TrayIconEvent),
+    Menu(MenuEvent),
+    VpnStatus(VpnStatus),
+}
+
+/// Tray application state
+pub struct TrayApp {
+    command_tx: mpsc::Sender<TrayCommand>,
+    status_rx: mpsc::Receiver<VpnStatus>,
+}
+
+impl TrayApp {
+    /// Create a new tray application
+    ///
+    /// Returns the app and channels for communication:
+    /// - command_rx: Receive commands from tray (connect, disconnect, etc.)
+    /// - status_tx: Send VPN status updates to tray
+    pub fn new() -> (Self, mpsc::Receiver<TrayCommand>, mpsc::Sender<VpnStatus>) {
+        let (command_tx, command_rx) = mpsc::channel();
+        let (status_tx, status_rx) = mpsc::channel();
+
+        let app = Self {
+            command_tx,
+            status_rx,
+        };
+
+        (app, command_rx, status_tx)
+    }
+
+    /// Run the tray application (blocking)
+    ///
+    /// This function runs the platform event loop and never returns
+    /// until the user exits the application.
+    pub fn run(self) -> ! {
+        info!("Starting system tray application");
+
+        // Build event loop with custom user events
+        let event_loop = EventLoopBuilder::<UserEvent>::with_user_event().build();
+        let proxy = event_loop.create_proxy();
+
+        // Set up event handlers to forward tray/menu events into event loop
+        let proxy_clone = proxy.clone();
+        TrayIconEvent::set_event_handler(Some(move |event| {
+            let _ = proxy_clone.send_event(UserEvent::TrayIcon(event));
+        }));
+
+        let proxy_clone = proxy.clone();
+        MenuEvent::set_event_handler(Some(move |event| {
+            let _ = proxy_clone.send_event(UserEvent::Menu(event));
+        }));
+
+        // Create menu items
+        let status_item = MenuItem::new("Status: Disconnected", false, None);
+        let connect_item = MenuItem::new("Connect", true, None);
+        let disconnect_item = MenuItem::new("Disconnect", false, None);
+        let exit_item = MenuItem::new("Exit", true, None);
+
+        // Store item IDs for event matching
+        let connect_id = connect_item.id().clone();
+        let disconnect_id = disconnect_item.id().clone();
+        let exit_id = exit_item.id().clone();
+
+        // Build menu
+        let menu = Menu::new();
+        menu.append_items(&[
+            &status_item,
+            &PredefinedMenuItem::separator(),
+            &connect_item,
+            &disconnect_item,
+            &PredefinedMenuItem::separator(),
+            &exit_item,
+        ])
+        .expect("Failed to build menu");
+
+        // Tray icon will be created after event loop starts
+        let mut tray_icon: Option<TrayIcon> = None;
+        let mut current_status = VpnStatus::Disconnected;
+        let command_tx = self.command_tx;
+        let status_rx = self.status_rx;
+
+        // Spawn a thread to forward status updates
+        let proxy_clone = proxy.clone();
+        std::thread::spawn(move || {
+            while let Ok(status) = status_rx.recv() {
+                let _ = proxy_clone.send_event(UserEvent::VpnStatus(status));
+            }
+        });
+
+        // Run the event loop (never returns)
+        event_loop.run(move |event, _elwt, control_flow| {
+            *control_flow = ControlFlow::Wait;
+
+            match event {
+                Event::NewEvents(StartCause::Init) => {
+                    // Create tray icon after event loop starts
+                    debug!("Creating tray icon");
+                    let icon = create_disconnected_icon();
+                    tray_icon = Some(
+                        TrayIconBuilder::new()
+                            .with_menu(Box::new(menu.clone()))
+                            .with_tooltip("PMACS VPN - Disconnected")
+                            .with_icon(icon)
+                            .build()
+                            .expect("Failed to create tray icon"),
+                    );
+                    info!("Tray icon created successfully");
+                }
+
+                Event::UserEvent(UserEvent::Menu(event)) => {
+                    if event.id == connect_id {
+                        info!("Tray: Connect clicked");
+                        let _ = command_tx.send(TrayCommand::Connect);
+                    } else if event.id == disconnect_id {
+                        info!("Tray: Disconnect clicked");
+                        let _ = command_tx.send(TrayCommand::Disconnect);
+                    } else if event.id == exit_id {
+                        info!("Tray: Exit clicked");
+                        let _ = command_tx.send(TrayCommand::Exit);
+                        *control_flow = ControlFlow::Exit;
+                    }
+                }
+
+                Event::UserEvent(UserEvent::VpnStatus(status)) => {
+                    if status != current_status {
+                        debug!("VPN status changed: {:?}", status);
+                        current_status = status.clone();
+                        if let Some(ref tray) = tray_icon {
+                            update_tray_for_status(tray, &status);
+                        }
+                    }
+                }
+
+                Event::UserEvent(UserEvent::TrayIcon(event)) => {
+                    debug!("Tray icon event: {:?}", event);
+                    // Handle double-click to toggle connection (optional)
+                }
+
+                _ => {}
+            }
+        })
+    }
+}
+
+/// Create a simple colored icon for disconnected state
+fn create_disconnected_icon() -> tray_icon::Icon {
+    // Create a simple 16x16 red/gray icon
+    create_solid_icon(128, 128, 128, 255) // Gray
+}
+
+/// Create a simple colored icon for connected state
+fn create_connected_icon() -> tray_icon::Icon {
+    create_solid_icon(0, 180, 0, 255) // Green
+}
+
+/// Create a simple colored icon for connecting state
+fn create_connecting_icon() -> tray_icon::Icon {
+    create_solid_icon(255, 180, 0, 255) // Orange/Yellow
+}
+
+/// Create a simple colored icon for error state
+fn create_error_icon() -> tray_icon::Icon {
+    create_solid_icon(220, 50, 50, 255) // Red
+}
+
+/// Create a solid-color 16x16 icon
+fn create_solid_icon(r: u8, g: u8, b: u8, a: u8) -> tray_icon::Icon {
+    let size = 16u32;
+    let mut rgba = Vec::with_capacity((size * size * 4) as usize);
+
+    // Create a simple circle icon
+    let center = size as f32 / 2.0;
+    let radius = center - 1.0;
+
+    for y in 0..size {
+        for x in 0..size {
+            let dx = x as f32 - center;
+            let dy = y as f32 - center;
+            let dist = (dx * dx + dy * dy).sqrt();
+
+            if dist <= radius {
+                // Inside circle - use color
+                rgba.push(r);
+                rgba.push(g);
+                rgba.push(b);
+                rgba.push(a);
+            } else if dist <= radius + 1.0 {
+                // Edge - anti-aliased
+                let alpha = ((radius + 1.0 - dist) * a as f32) as u8;
+                rgba.push(r);
+                rgba.push(g);
+                rgba.push(b);
+                rgba.push(alpha);
+            } else {
+                // Outside - transparent
+                rgba.push(0);
+                rgba.push(0);
+                rgba.push(0);
+                rgba.push(0);
+            }
+        }
+    }
+
+    tray_icon::Icon::from_rgba(rgba, size, size).expect("Failed to create icon")
+}
+
+/// Update tray icon and tooltip based on VPN status
+fn update_tray_for_status(tray: &TrayIcon, status: &VpnStatus) {
+    let (icon, tooltip) = match status {
+        VpnStatus::Disconnected => (create_disconnected_icon(), "PMACS VPN - Disconnected"),
+        VpnStatus::Connecting => (create_connecting_icon(), "PMACS VPN - Connecting..."),
+        VpnStatus::Connected { ip } => {
+            let tooltip = format!("PMACS VPN - Connected ({})", ip);
+            // Leak the string since set_tooltip needs &str with static lifetime behavior
+            // This is fine since we only have a few status changes
+            let tooltip_static: &'static str = Box::leak(tooltip.into_boxed_str());
+            (create_connected_icon(), tooltip_static)
+        }
+        VpnStatus::Disconnecting => (create_connecting_icon(), "PMACS VPN - Disconnecting..."),
+        VpnStatus::Error(msg) => {
+            let tooltip = format!("PMACS VPN - Error: {}", msg);
+            let tooltip_static: &'static str = Box::leak(tooltip.into_boxed_str());
+            (create_error_icon(), tooltip_static)
+        }
+    };
+
+    if let Err(e) = tray.set_icon(Some(icon)) {
+        error!("Failed to set tray icon: {}", e);
+    }
+    if let Err(e) = tray.set_tooltip(Some(tooltip)) {
+        error!("Failed to set tooltip: {}", e);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_vpn_status_equality() {
+        assert_eq!(VpnStatus::Disconnected, VpnStatus::Disconnected);
+        assert_eq!(VpnStatus::Connecting, VpnStatus::Connecting);
+        assert_ne!(VpnStatus::Disconnected, VpnStatus::Connecting);
+    }
+
+    #[test]
+    fn test_vpn_status_connected() {
+        let s1 = VpnStatus::Connected {
+            ip: "10.0.0.1".to_string(),
+        };
+        let s2 = VpnStatus::Connected {
+            ip: "10.0.0.1".to_string(),
+        };
+        assert_eq!(s1, s2);
+    }
+
+    #[test]
+    fn test_create_solid_icon() {
+        // Just verify it doesn't panic
+        let _icon = create_solid_icon(255, 0, 0, 255);
+        let _icon = create_disconnected_icon();
+        let _icon = create_connected_icon();
+        let _icon = create_connecting_icon();
+        let _icon = create_error_icon();
+    }
+
+    #[test]
+    fn test_tray_command_clone() {
+        let cmd = TrayCommand::Connect;
+        let _cmd2 = cmd.clone();
+    }
+}

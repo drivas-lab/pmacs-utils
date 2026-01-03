@@ -58,6 +58,9 @@ pub struct VpnState {
     pub hosts_entries: Vec<RouteEntry>,
     /// When the VPN was connected
     pub connected_at: String,
+    /// Process ID of the VPN daemon (if running in background)
+    #[serde(default)]
+    pub pid: Option<u32>,
 }
 
 impl Default for VpnState {
@@ -69,6 +72,7 @@ impl Default for VpnState {
             routes: vec![],
             hosts_entries: vec![],
             connected_at: String::new(),
+            pid: None,
         }
     }
 }
@@ -83,6 +87,7 @@ impl VpnState {
             routes: vec![],
             hosts_entries: vec![],
             connected_at: chrono_lite_now(),
+            pid: None,
         }
     }
 
@@ -152,6 +157,89 @@ impl VpnState {
     /// Check if there's an active state (for status command)
     pub fn is_active() -> bool {
         Self::load().ok().flatten().is_some()
+    }
+
+    /// Set the daemon PID
+    pub fn set_pid(&mut self, pid: u32) {
+        self.pid = Some(pid);
+    }
+
+    /// Check if the daemon process is still running
+    #[cfg(windows)]
+    pub fn is_daemon_running(&self) -> bool {
+        use std::process::Command;
+
+        if let Some(pid) = self.pid {
+            // Use tasklist to check if process exists
+            let output = Command::new("tasklist")
+                .args(["/FI", &format!("PID eq {}", pid), "/NH"])
+                .output();
+
+            match output {
+                Ok(out) => {
+                    let stdout = String::from_utf8_lossy(&out.stdout);
+                    stdout.contains(&pid.to_string())
+                }
+                Err(_) => false,
+            }
+        } else {
+            false
+        }
+    }
+
+    /// Check if the daemon process is still running
+    #[cfg(not(windows))]
+    pub fn is_daemon_running(&self) -> bool {
+        use std::process::Command;
+
+        if let Some(pid) = self.pid {
+            // Use kill -0 to check if process exists (doesn't actually send signal)
+            Command::new("kill")
+                .args(["-0", &pid.to_string()])
+                .status()
+                .map(|s| s.success())
+                .unwrap_or(false)
+        } else {
+            false
+        }
+    }
+
+    /// Kill the daemon process
+    #[cfg(windows)]
+    pub fn kill_daemon(&self) -> Result<(), StateError> {
+        use std::process::Command;
+
+        if let Some(pid) = self.pid {
+            let status = Command::new("taskkill")
+                .args(["/PID", &pid.to_string(), "/F"])
+                .status()
+                .map_err(StateError::ReadError)?;
+
+            if !status.success() {
+                // Process might already be dead, which is fine
+                tracing::warn!("taskkill returned non-zero for PID {}", pid);
+            }
+        }
+        Ok(())
+    }
+
+    /// Kill the daemon process
+    #[cfg(not(windows))]
+    pub fn kill_daemon(&self) -> Result<(), StateError> {
+        use std::process::Command;
+
+        if let Some(pid) = self.pid {
+            let status = Command::new("kill")
+                .args(["-TERM", &pid.to_string()])
+                .status()
+                .map_err(StateError::ReadError)?;
+
+            if !status.success() {
+                // Process might already be dead, which is fine
+                tracing::warn!("kill returned non-zero for PID {}", pid);
+            }
+        }
+        Ok(())
     }
 }
 
@@ -232,5 +320,55 @@ mod tests {
             ip: "10.0.0.1".parse().unwrap(),
         };
         assert_eq!(entry1, entry2);
+    }
+
+    #[test]
+    fn test_state_pid_default_none() {
+        let state = VpnState::default();
+        assert!(state.pid.is_none());
+    }
+
+    #[test]
+    fn test_state_set_pid() {
+        let mut state = VpnState::default();
+        assert!(state.pid.is_none());
+
+        state.set_pid(12345);
+        assert_eq!(state.pid, Some(12345));
+    }
+
+    #[test]
+    fn test_state_pid_serialization() {
+        let mut state = VpnState::new("utun9".to_string(), "10.0.0.1".parse().unwrap());
+        state.set_pid(99999);
+
+        let json = serde_json::to_string(&state).unwrap();
+        assert!(json.contains("99999"));
+        assert!(json.contains("\"pid\":99999"));
+
+        let parsed: VpnState = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed.pid, Some(99999));
+    }
+
+    #[test]
+    fn test_state_pid_deserialization_missing() {
+        // Old state files without pid field should deserialize with pid=None
+        let json = r#"{
+            "version": 1,
+            "tunnel_device": "utun9",
+            "gateway": "10.0.0.1",
+            "routes": [],
+            "hosts_entries": [],
+            "connected_at": "12345"
+        }"#;
+
+        let parsed: VpnState = serde_json::from_str(json).unwrap();
+        assert!(parsed.pid.is_none());
+    }
+
+    #[test]
+    fn test_is_daemon_running_no_pid() {
+        let state = VpnState::default();
+        assert!(!state.is_daemon_running());
     }
 }

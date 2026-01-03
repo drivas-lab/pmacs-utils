@@ -33,6 +33,18 @@ enum Commands {
         /// Delete stored password before prompting
         #[arg(long)]
         forget_password: bool,
+
+        /// Use aggressive keepalive to prevent idle timeout (10s instead of 30s)
+        #[arg(long)]
+        keep_alive: bool,
+
+        /// Run VPN in background (daemon mode)
+        #[arg(long)]
+        daemon: bool,
+
+        /// Internal: PID passed from daemon parent (do not use directly)
+        #[arg(long, hide = true)]
+        _daemon_pid: Option<u32>,
     },
     /// Disconnect from VPN and clean up routes
     Disconnect,
@@ -53,6 +65,8 @@ enum Commands {
         #[arg(short, long)]
         user: String,
     },
+    /// Run with system tray (GUI mode)
+    Tray,
 }
 
 #[tokio::main]
@@ -74,13 +88,30 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     tracing::subscriber::set_global_default(subscriber)?;
 
     match cli.command {
-        Commands::Connect { user, save_password, forget_password } => {
-            info!("Connecting to PMACS VPN...");
-            match connect_vpn(user, save_password, forget_password).await {
-                Ok(()) => info!("VPN connection closed"),
-                Err(e) => {
-                    error!("VPN connection failed: {}", e);
-                    std::process::exit(1);
+        Commands::Connect { user, save_password, forget_password, keep_alive, daemon, _daemon_pid } => {
+            // Daemon mode: spawn detached child process
+            if daemon {
+                match spawn_daemon(&user, save_password, forget_password, keep_alive) {
+                    Ok(pid) => {
+                        println!("VPN daemon started (PID: {})", pid);
+                        println!("Use 'pmacs-vpn status' to check connection");
+                        println!("Use 'pmacs-vpn disconnect' to stop");
+                    }
+                    Err(e) => {
+                        error!("Failed to start daemon: {}", e);
+                        std::process::exit(1);
+                    }
+                }
+            } else {
+                // If _daemon_pid is set, we're running as a background daemon
+                let is_daemon = _daemon_pid.is_some();
+                info!("Connecting to PMACS VPN...");
+                match connect_vpn(user, save_password, forget_password, keep_alive, is_daemon).await {
+                    Ok(()) => info!("VPN connection closed"),
+                    Err(e) => {
+                        error!("VPN connection failed: {}", e);
+                        std::process::exit(1);
+                    }
                 }
             }
         }
@@ -99,9 +130,22 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             if pmacs_vpn::VpnState::is_active() {
                 match pmacs_vpn::VpnState::load() {
                     Ok(Some(state)) => {
+                        // Check if daemon is still running
+                        let daemon_status = if let Some(pid) = state.pid {
+                            if state.is_daemon_running() {
+                                format!("Running (PID: {})", pid)
+                            } else {
+                                format!("Stopped (stale PID: {})", pid)
+                            }
+                        } else {
+                            "Foreground".to_string()
+                        };
+
                         println!("VPN Status: Connected");
+                        println!("  Mode: {}", daemon_status);
                         println!("  Tunnel: {}", state.tunnel_device);
                         println!("  Gateway: {}", state.gateway);
+                        println!("  Connected: {}", state.connected_at);
                         println!("  Routes: {}", state.routes.len());
                         for route in &state.routes {
                             println!("    {} -> {}", route.hostname, route.ip);
@@ -143,33 +187,261 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
             }
         }
+        Commands::Tray => {
+            info!("Starting system tray mode...");
+            run_tray_mode().await;
+        }
     }
 
     Ok(())
 }
 
-/// Connect to VPN using native GlobalProtect implementation
-async fn connect_vpn(user: Option<String>, save_password: bool, forget_password: bool) -> Result<(), Box<dyn std::error::Error>> {
-    // 1. Load config
+/// Run the VPN with system tray GUI
+async fn run_tray_mode() {
+    use pmacs_vpn::tray::{TrayApp, TrayCommand, VpnStatus};
+
+    // Create tray app and get channels
+    let (app, command_rx, status_tx) = TrayApp::new();
+
+    // Load config for VPN operations (for future use)
     let config_path = std::path::PathBuf::from("pmacs-vpn.toml");
-    let config = if config_path.exists() {
-        pmacs_vpn::Config::load(&config_path)?
+    let _config = if config_path.exists() {
+        pmacs_vpn::Config::load(&config_path).ok()
     } else {
-        info!("No config file found, using defaults");
-        pmacs_vpn::Config::default()
+        None
     };
+
+    // Clone for the command handler
+    let status_tx_clone = status_tx.clone();
+
+    // Spawn command handler on tokio runtime
+    let handle = tokio::spawn(async move {
+        while let Ok(cmd) = command_rx.recv() {
+            match cmd {
+                TrayCommand::Connect => {
+                    info!("Tray: Received connect command");
+                    let _ = status_tx_clone.send(VpnStatus::Connecting);
+
+                    // For now, spawn the VPN as a daemon process
+                    // A more integrated solution would run the VPN directly
+                    let spawn_result = spawn_daemon(&None, false, false, false);
+                    let pid_opt = spawn_result.ok();
+
+                    if let Some(pid) = pid_opt {
+                        info!("VPN daemon started with PID {}", pid);
+                        // Wait a bit for connection to establish
+                        tokio::time::sleep(tokio::time::Duration::from_secs(5)).await;
+
+                        // Check if connected
+                        if let Ok(Some(state)) = pmacs_vpn::VpnState::load() {
+                            let _ = status_tx_clone.send(VpnStatus::Connected {
+                                ip: state.gateway.to_string(),
+                            });
+                        }
+                    } else {
+                        error!("Failed to start VPN daemon");
+                        let _ = status_tx_clone.send(VpnStatus::Error("Failed to spawn daemon".to_string()));
+                    }
+                }
+                TrayCommand::Disconnect => {
+                    info!("Tray: Received disconnect command");
+                    let _ = status_tx_clone.send(VpnStatus::Disconnecting);
+
+                    // Kill daemon and cleanup
+                    if let Ok(Some(state)) = pmacs_vpn::VpnState::load() {
+                        if state.pid.is_some() && state.is_daemon_running() {
+                            let _ = state.kill_daemon();
+                        }
+                    }
+
+                    // Cleanup routes and hosts
+                    match disconnect_vpn().await {
+                        Ok(()) => {
+                            let _ = status_tx_clone.send(VpnStatus::Disconnected);
+                        }
+                        Err(e) => {
+                            error!("Disconnect error: {}", e);
+                            let _ = status_tx_clone.send(VpnStatus::Error(e.to_string()));
+                        }
+                    }
+                }
+                TrayCommand::ShowStatus => {
+                    info!("Tray: Show status requested");
+                    // Future: Show a status window
+                }
+                TrayCommand::Exit => {
+                    info!("Tray: Exit requested");
+                    // Cleanup if connected
+                    if let Ok(Some(state)) = pmacs_vpn::VpnState::load() {
+                        if state.pid.is_some() && state.is_daemon_running() {
+                            let _ = state.kill_daemon();
+                        }
+                        let _ = disconnect_vpn().await;
+                    }
+                    break;
+                }
+            }
+        }
+    });
+
+    // Check initial VPN state
+    if let Ok(Some(state)) = pmacs_vpn::VpnState::load() {
+        if state.is_daemon_running() {
+            let _ = status_tx.send(VpnStatus::Connected {
+                ip: state.gateway.to_string(),
+            });
+        }
+    }
+
+    // Run tray (this blocks until exit)
+    // Note: This will run on the current thread, not tokio
+    std::thread::spawn(move || {
+        app.run();
+    });
+
+    // Wait for the command handler to finish
+    let _ = handle.await;
+}
+
+/// Spawn VPN as a detached background process (daemon mode)
+fn spawn_daemon(
+    user: &Option<String>,
+    save_password: bool,
+    forget_password: bool,
+    keep_alive: bool,
+) -> Result<u32, Box<dyn std::error::Error>> {
+    use std::process::Command;
+
+    // Build command with same args minus --daemon, plus --_daemon-pid marker
+    let exe = std::env::current_exe()?;
+    let mut cmd = Command::new(&exe);
+    cmd.arg("connect");
+    cmd.arg("--_daemon-pid=1"); // Marker that tells child it's a daemon (value ignored)
+
+    if let Some(u) = user {
+        cmd.args(["--user", u]);
+    }
+    if save_password {
+        cmd.arg("--save-password");
+    }
+    if forget_password {
+        cmd.arg("--forget-password");
+    }
+    if keep_alive {
+        cmd.arg("--keep-alive");
+    }
+
+    // Platform-specific detachment
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        // CREATE_NEW_PROCESS_GROUP | DETACHED_PROCESS
+        const CREATE_NEW_PROCESS_GROUP: u32 = 0x00000200;
+        const DETACHED_PROCESS: u32 = 0x00000008;
+        cmd.creation_flags(CREATE_NEW_PROCESS_GROUP | DETACHED_PROCESS);
+    }
+
+    #[cfg(not(windows))]
+    {
+        use std::process::Stdio;
+        cmd.stdin(Stdio::null());
+        cmd.stdout(Stdio::null());
+        cmd.stderr(Stdio::null());
+    }
+
+    let child = cmd.spawn()?;
+    let pid = child.id();
+
+    Ok(pid)
+}
+
+/// Prompt for input with optional default value
+fn prompt(label: &str, default: Option<&str>) -> String {
+    use std::io::Write;
+
+    if let Some(def) = default {
+        print!("{} [{}]: ", label, def);
+    } else {
+        print!("{}: ", label);
+    }
+    std::io::stdout().flush().unwrap();
+
+    let mut input = String::new();
+    std::io::stdin().read_line(&mut input).unwrap();
+    let input = input.trim();
+
+    if input.is_empty() {
+        default.unwrap_or("").to_string()
+    } else {
+        input.to_string()
+    }
+}
+
+/// Prompt for yes/no with default
+fn prompt_yn(label: &str, default_yes: bool) -> bool {
+    use std::io::Write;
+
+    let suffix = if default_yes { "[Y/n]" } else { "[y/N]" };
+    print!("{} {}: ", label, suffix);
+    std::io::stdout().flush().unwrap();
+
+    let mut input = String::new();
+    std::io::stdin().read_line(&mut input).unwrap();
+    let input = input.trim().to_lowercase();
+
+    if input.is_empty() {
+        default_yes
+    } else {
+        input.starts_with('y')
+    }
+}
+
+/// Connect to VPN using native GlobalProtect implementation
+async fn connect_vpn(user: Option<String>, save_password: bool, forget_password: bool, keep_alive: bool, is_daemon: bool) -> Result<(), Box<dyn std::error::Error>> {
+    // 1. Load or create config interactively
+    let config_path = std::path::PathBuf::from("pmacs-vpn.toml");
+    let (config, save_config) = if config_path.exists() {
+        (pmacs_vpn::Config::load(&config_path)?, false)
+    } else {
+        println!("No config found. Let's set one up.\n");
+
+        let defaults = pmacs_vpn::Config::default();
+
+        let gateway = prompt("Gateway", Some(&defaults.vpn.gateway));
+        let username_input = prompt("Username", None);
+        let hosts_input = prompt("Hosts to route (comma-separated)", Some(&defaults.hosts.join(", ")));
+
+        let hosts: Vec<String> = hosts_input
+            .split(',')
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .collect();
+
+        println!();
+        let save = prompt_yn("Save config for next time?", true);
+
+        let config = pmacs_vpn::Config {
+            vpn: pmacs_vpn::VpnConfig {
+                gateway,
+                protocol: "gp".to_string(),
+                username: Some(username_input),
+            },
+            hosts,
+        };
+
+        (config, save)
+    };
+
+    // Save config if user requested
+    if save_config {
+        config.save(&config_path)?;
+        println!("Config saved to pmacs-vpn.toml\n");
+    }
 
     // 2. Get username (from arg, config, or prompt)
     let username = user
         .or_else(|| config.vpn.username.clone())
-        .unwrap_or_else(|| {
-            print!("Username: ");
-            use std::io::Write;
-            std::io::stdout().flush().unwrap();
-            let mut input = String::new();
-            std::io::stdin().read_line(&mut input).unwrap();
-            input.trim().to_string()
-        });
+        .unwrap_or_else(|| prompt("Username", None));
 
     // 3. Handle --forget-password: delete stored password before prompting
     if forget_password {
@@ -213,11 +485,12 @@ async fn connect_vpn(user: Option<String>, save_password: bool, forget_password:
 
     // 6. Create tunnel
     println!("Establishing tunnel...");
-    let mut tunnel = gp::tunnel::SslTunnel::connect(
+    let mut tunnel = gp::tunnel::SslTunnel::connect_with_options(
         &config.vpn.gateway,
         &login.username,
         &login.auth_cookie,
         &tunnel_config,
+        keep_alive,
     )
     .await?;
 
@@ -229,8 +502,12 @@ async fn connect_vpn(user: Option<String>, save_password: bool, forget_password:
     let hosts_to_route = config.hosts.clone();
 
     println!("Connected! Press Ctrl+C to disconnect.");
-    println!("TUN device: {}", tun_name);
-    println!("Internal IP: {}", internal_ip);
+    println!("  TUN device: {}", tun_name);
+    println!("  Internal IP: {}", internal_ip);
+    if keep_alive {
+        println!("  Keep-alive: aggressive (10s interval)");
+    }
+    println!("  Session expires in: 16 hours");
 
     // 8. Save password if --save-password was passed
     if save_password {
@@ -312,7 +589,10 @@ async fn connect_vpn(user: Option<String>, save_password: bool, forget_password:
     let hosts_mgr = HostsManager::new();
     hosts_mgr.add_entries(&hosts_map)?;
 
-    // 12. Save state for cleanup
+    // 12. Save state for cleanup (include PID if running as daemon)
+    if is_daemon {
+        state.set_pid(std::process::id());
+    }
     state.save()?;
 
     println!("Routes configured. VPN is ready.");
@@ -341,6 +621,18 @@ async fn connect_vpn(user: Option<String>, save_password: bool, forget_password:
 /// Disconnect from VPN and clean up
 async fn disconnect_vpn() -> Result<(), Box<dyn std::error::Error>> {
     if let Some(state) = pmacs_vpn::VpnState::load()? {
+        // Kill daemon process if running
+        if state.pid.is_some() {
+            if state.is_daemon_running() {
+                info!("Stopping VPN daemon (PID: {:?})", state.pid);
+                state.kill_daemon()?;
+                // Give it a moment to clean up
+                tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
+            } else {
+                info!("Daemon process not running, cleaning up stale state");
+            }
+        }
+
         cleanup_vpn(&state).await?;
         println!("Disconnected successfully");
     } else {

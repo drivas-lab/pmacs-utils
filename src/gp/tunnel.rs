@@ -9,13 +9,13 @@ use crate::gp::tun::TunDevice;
 use rustls::RootCertStore;
 use std::io;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use thiserror::Error;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 use tokio::time::interval;
 use tokio_rustls::TlsConnector;
-use tracing::{debug, error, info};
+use tracing::{debug, error, info, warn};
 
 /// Tunnel errors
 #[derive(Error, Debug)]
@@ -37,15 +37,23 @@ pub enum TunnelError {
 
     #[error("Tunnel disconnected")]
     Disconnected,
+
+    #[error("Session expired")]
+    SessionExpired,
 }
 
 const KEEPALIVE_INTERVAL_SECS: u64 = 30;
+const AGGRESSIVE_KEEPALIVE_SECS: u64 = 10;
+const SESSION_LIFETIME_SECS: u64 = 16 * 60 * 60; // 16 hours
+const SESSION_WARNING_SECS: u64 = 15 * 60 * 60;  // Warn at 15 hours
 
 /// SSL tunnel connection to GlobalProtect gateway
 pub struct SslTunnel {
     stream: tokio_rustls::client::TlsStream<TcpStream>,
     tun: TunDevice,
     keepalive_interval: Duration,
+    session_start: Instant,
+    last_warning_hour: u64,
 }
 
 impl SslTunnel {
@@ -65,6 +73,20 @@ impl SslTunnel {
         auth_cookie: &str,
         config: &TunnelConfig,
     ) -> Result<Self, TunnelError> {
+        Self::connect_with_options(gateway, username, auth_cookie, config, false).await
+    }
+
+    /// Connect with configurable keepalive behavior
+    ///
+    /// # Arguments
+    /// * `aggressive_keepalive` - Use shorter keepalive interval (10s vs 30s)
+    pub async fn connect_with_options(
+        gateway: &str,
+        username: &str,
+        auth_cookie: &str,
+        config: &TunnelConfig,
+        aggressive_keepalive: bool,
+    ) -> Result<Self, TunnelError> {
         info!("Establishing SSL tunnel to {}", gateway);
 
         // 1. Create TUN device first
@@ -80,10 +102,19 @@ impl SslTunnel {
         let stream = tls_connect(gateway, tcp).await?;
         info!("TLS handshake completed");
 
+        let keepalive_secs = if aggressive_keepalive {
+            info!("Using aggressive keepalive ({}s)", AGGRESSIVE_KEEPALIVE_SECS);
+            AGGRESSIVE_KEEPALIVE_SECS
+        } else {
+            KEEPALIVE_INTERVAL_SECS
+        };
+
         let mut tunnel = Self {
             stream,
             tun,
-            keepalive_interval: Duration::from_secs(KEEPALIVE_INTERVAL_SECS),
+            keepalive_interval: Duration::from_secs(keepalive_secs),
+            session_start: Instant::now(),
+            last_warning_hour: 0,
         };
 
         // 4. Send tunnel request
@@ -150,6 +181,40 @@ impl SslTunnel {
         Ok(())
     }
 
+    /// Check session lifetime and print warnings
+    fn check_session_expiry(&mut self) -> Result<(), TunnelError> {
+        let elapsed = self.session_start.elapsed().as_secs();
+
+        // Check for session expiry (16 hours)
+        if elapsed >= SESSION_LIFETIME_SECS {
+            error!("Session lifetime exceeded (16 hours). Disconnecting.");
+            return Err(TunnelError::SessionExpired);
+        }
+
+        // Warn at 15hr, 15hr30, 15hr45, 15hr55
+        if elapsed >= SESSION_WARNING_SECS {
+            let hours = elapsed / 3600;
+            let mins = (elapsed % 3600) / 60;
+            let remaining_mins = (SESSION_LIFETIME_SECS - elapsed) / 60;
+
+            // Warn at specific intervals (don't spam)
+            let warning_key = hours * 60 + mins / 15; // Warn every 15 mins after 15hr
+            if warning_key > self.last_warning_hour {
+                self.last_warning_hour = warning_key;
+                warn!(
+                    "Session expires in {} minutes (connected {}h{}m)",
+                    remaining_mins, hours, mins % 60
+                );
+                eprintln!(
+                    "\n*** WARNING: VPN session expires in {} minutes. Reconnect soon. ***\n",
+                    remaining_mins
+                );
+            }
+        }
+
+        Ok(())
+    }
+
     /// Run the tunnel event loop
     ///
     /// This function runs until the tunnel is disconnected or an error occurs.
@@ -166,6 +231,10 @@ impl SslTunnel {
         let mtu = self.tun.mtu();
         let mut keepalive = interval(self.keepalive_interval);
         keepalive.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+
+        // Session check timer (every 5 minutes)
+        let mut session_check = interval(Duration::from_secs(300));
+        session_check.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
         // Pre-allocate buffers outside the loop to avoid repeated allocation
         let mut tun_buf = vec![0u8; mtu + 128];
@@ -243,6 +312,11 @@ impl SslTunnel {
                 _ = keepalive.tick() => {
                     debug!("Sending keepalive");
                     self.send_keepalive().await?;
+                }
+
+                // Priority 4: Session expiry check
+                _ = session_check.tick() => {
+                    self.check_session_expiry()?;
                 }
             }
         }

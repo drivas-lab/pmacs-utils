@@ -39,6 +39,11 @@ rpassword = "7"
 # Secure credential storage (Windows Credential Manager, macOS Keychain, Linux Secret Service)
 keyring = { version = "3", features = ["windows-native", "apple-native", "linux-native"] }
 
+# System tray support
+tray-icon = "0.21"
+tao = "0.30"
+image = "0.25"
+
 [target.'cfg(unix)'.dependencies]
 nix = { version = "0.29", features = ["net", "process", "user"] }
 

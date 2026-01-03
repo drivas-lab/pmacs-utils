@@ -2,6 +2,17 @@
 
 Native GlobalProtect VPN client with split-tunneling for PMACS cluster access.
 
+## Why?
+
+The official GlobalProtect client routes *all* your traffic through the VPN (full-tunnel), which:
+- Slows down your internet
+- Routes personal traffic through institutional servers
+- Requires installing bloated client software
+
+This tool only routes PMACS traffic through the VPN, leaving everything else alone.
+
+## Features
+
 - **Split-tunnel** — only PMACS traffic goes through VPN
 - **Single binary** — no OpenConnect, no Python, no Java
 - **Credential caching** — password stored in OS keychain
@@ -61,6 +72,7 @@ Or generate a default: `pmacs-vpn init`
 | `disconnect` | Disconnect and clean up |
 | `status` | Show connection status |
 | `init` | Generate default config |
+| `tray` | Run with system tray icon (GUI mode) |
 
 ### Connect Options
 
@@ -69,6 +81,33 @@ Or generate a default: `pmacs-vpn init`
 | `--save-password` | Store password in OS keychain |
 | `--forget-password` | Clear stored password |
 | `-u, --user <USER>` | Override username |
+| `--keep-alive` | Aggressive keepalive to prevent idle timeout |
+| `--daemon` | Run VPN in background (frees terminal) |
+
+## Daemon Mode
+
+Run VPN in background without keeping a terminal open:
+
+```powershell
+# Start VPN daemon
+pmacs-vpn connect --daemon
+
+# Check if running
+pmacs-vpn status
+
+# Stop
+pmacs-vpn disconnect
+```
+
+## System Tray Mode
+
+Run with a system tray icon for GUI-based control:
+
+```powershell
+pmacs-vpn tray
+```
+
+Right-click the tray icon for Connect/Disconnect/Exit options.
 
 ## Desktop Shortcuts (Windows)
 
