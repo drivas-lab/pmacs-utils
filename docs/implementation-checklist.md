@@ -7,34 +7,33 @@
 ✅ Platform routing managers (macOS/Linux/Windows)
 ✅ VPN routing with DNS resolution
 ✅ Hosts file management
-✅ Unit tests (26 tests passing)
+✅ Unit tests (41 tests passing)
+✅ **OpenConnect script mode (P1 complete)**
 
 ---
 
-## Priority 1: Core Functionality (MVP)
+## Priority 1: Core Functionality (MVP) ✅ COMPLETE
 
-These are required for basic split-tunnel VPN to work.
+### P1.1: OpenConnect Script Mode ✅
+- [x] Parse OpenConnect environment variables (`TUNDEV`, `INTERNAL_IP4_DNS`, `VPNGATEWAY`, `reason`)
+- [x] Implement `connect` handler (configure tunnel, add routes, update hosts)
+- [x] Implement `disconnect` handler (cleanup routes, restore hosts)
+- [x] Add `script` CLI command for OpenConnect to invoke us
 
-### P1.1: OpenConnect Script Mode
-- [ ] Parse OpenConnect environment variables (`TUNDEV`, `INTERNAL_IP4_DNS`, `VPNGATEWAY`, `reason`)
-- [ ] Implement `connect` handler (configure tunnel, add routes, update hosts)
-- [ ] Implement `disconnect` handler (cleanup routes, restore hosts)
-- [ ] Add `--script` CLI mode for OpenConnect to invoke us
+### P1.2: VPN DNS Resolution ✅
+- [x] Use VPN's DNS server (`INTERNAL_IP4_DNS`) for hostname resolution
+- [x] Cache resolved IPs in state for disconnect cleanup
+- [ ] Fall back to system DNS if VPN DNS fails (deferred - not critical)
 
-### P1.2: VPN DNS Resolution
-- [ ] Use VPN's DNS server (`INTERNAL_IP4_DNS`) for hostname resolution
-- [ ] Fall back to system DNS if VPN DNS fails
-- [ ] Cache resolved IPs for disconnect cleanup
+### P1.3: macOS Route Commands ✅
+- [x] Update `MacRoutingManager` to use `-interface <tundev>` syntax
+- [x] Handle route conflicts (route already exists)
+- [ ] Test with actual VPN tunnel device (requires VPN credentials)
 
-### P1.3: macOS Route Commands
-- [ ] Update `MacRoutingManager` to use `-interface <tundev>` syntax
-- [ ] Handle route conflicts (route already exists)
-- [ ] Test with actual VPN tunnel device
-
-### P1.4: State Persistence
-- [ ] Track active routes/hosts in state file (`~/.pmacs-vpn/state.json`)
-- [ ] Enable cleanup even if process crashes
-- [ ] Implement `status` command to show active state
+### P1.4: State Persistence ✅
+- [x] Track active routes/hosts in state file (`~/.pmacs-vpn/state.json`)
+- [x] Enable cleanup even if process crashes
+- [x] Implement `status` command to show active state
 
 ---
 
@@ -147,4 +146,6 @@ sudo pmacs-vpn disconnect
 
 ## Next Action
 
-Start with **P1.1: OpenConnect Script Mode** - this is the core functionality that makes everything else work.
+Start with **P2.1: Connect Command (Wrapper Mode)** - spawn OpenConnect automatically so users don't need to run the complex command manually.
+
+See `docs/handoff-p1.md` for detailed implementation notes from the P1 sprint.
