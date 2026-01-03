@@ -2,213 +2,105 @@
 
 ## Prerequisites
 
-### 1. Install Docker Desktop
+### 1. Install Homebrew
 
-Download from: https://www.docker.com/products/docker-desktop/
-
-Or with Homebrew:
+If you don't have Homebrew:
 ```bash
-brew install --cask docker
+/bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
 ```
 
-After installation:
-1. Start Docker from Applications
-2. Grant permissions when prompted
-3. Wait for Docker to fully start (menu bar icon stops animating)
-4. Verify: `docker --version`
-
-### 2. Install a SOCKS-capable netcat
-
-macOS includes BSD netcat, but it lacks the `-x` (proxy) option. You have two options:
-
-**Option A: ncat from nmap (recommended)**
-```bash
-brew install nmap
-```
-Then use this ProxyCommand in SSH config:
-```
-ProxyCommand ncat --proxy 127.0.0.1:8889 --proxy-type socks5 %h %p
-```
-
-**Option B: GNU netcat**
-```bash
-brew install netcat
-```
-GNU netcat is keg-only, so add it to your PATH in `~/.zshrc`:
-```bash
-export PATH="/opt/homebrew/opt/netcat/bin:$PATH"  # Apple Silicon
-# or: export PATH="/usr/local/opt/netcat/bin:$PATH"  # Intel Mac
-```
-Then reload: `source ~/.zshrc`
-
-## Installation
+### 2. Install OpenConnect
 
 ```bash
-# Clone the repo
-git clone https://github.com/drivaslab/pmacs-utils.git
-cd pmacs-utils
-
-# Create your config
-cp .env.example .env
-
-# Edit with your credentials
-nano .env
-# or: open .env  (opens in default editor)
+brew install openconnect
 ```
 
-## SSH Configuration
-
-### Automatic Setup (recommended)
+### 3. Install vpn-slice
 
 ```bash
-./ssh/setup.sh
+sudo pip3 install vpn-slice
 ```
 
-This will:
-1. Detect if you have `ncat` or GNU `nc` installed
-2. Create `~/.ssh/sockets` directory
-3. Back up existing SSH config
-4. Add PMACS configuration with the correct ProxyCommand
-5. Prompt for your username
+Verify it works:
+```bash
+sudo vpn-slice --self-test
+```
 
-### Manual Setup
+## Manual Connection (Before Scripts Are Ready)
+
+```bash
+# Connect to VPN with split tunneling
+sudo openconnect psomvpn.uphs.upenn.edu \
+  --protocol=gp \
+  --user=YOUR_USERNAME \
+  -s 'vpn-slice prometheus.pmacs.upenn.edu'
+
+# Enter your PMACS password when prompted
+# Enter "push" for the passcode (triggers DUO)
+# Approve the DUO push on your phone
+```
+
+Keep this terminal open while connected. Ctrl+C to disconnect.
+
+## SSH Setup
 
 Add to `~/.ssh/config`:
-
 ```
 Host prometheus
     HostName prometheus.pmacs.upenn.edu
     User YOUR_USERNAME
-    # Use ncat (recommended) or nc depending on what you installed
-    ProxyCommand ncat --proxy 127.0.0.1:8889 --proxy-type socks5 %h %p
     ServerAliveInterval 60
     ServerAliveCountMax 3
-    ControlMaster auto
-    ControlPath ~/.ssh/sockets/%r@%h-%p
-    ControlPersist 600
 ```
 
-Create sockets directory:
+Then:
 ```bash
-mkdir -p ~/.ssh/sockets
-chmod 700 ~/.ssh/sockets
-```
-
-## Usage
-
-```bash
-# Start VPN
-./scripts/connect.sh
-
-# Approve DUO push on your phone
-
-# SSH to cluster
 ssh prometheus
-
-# Check status
-./scripts/status.sh
-
-# Disconnect
-./scripts/disconnect.sh
 ```
 
-## Common Issues
+## SSH Key Setup (Avoid Typing Password)
 
-### "nc: invalid option -- 'x'"
-
-You're using BSD netcat instead of GNU netcat.
-
-**Fix 1:** Install GNU netcat:
+Generate a key (if you don't have one):
 ```bash
-brew install netcat
+ssh-keygen -t ed25519 -C "your_email@example.com"
 ```
 
-**Fix 2:** Use ncat instead (edit `~/.ssh/config`):
-```
-ProxyCommand ncat --proxy 127.0.0.1:8889 --proxy-type socks5 %h %p
-```
-
-### Docker not starting
-
-1. Check System Preferences > Security & Privacy > Privacy > Full Disk Access
-2. Ensure Docker has permission
-3. Try: `killall Docker && open -a Docker`
-
-### "Cannot connect to the Docker daemon"
-
-Docker Desktop isn't running. Start it from Applications.
-
-### Connection hangs after "Waiting for VPN tunnel"
-
-Check container logs:
+With VPN connected, copy your key to the server:
 ```bash
-docker logs -f pmacs-vpn
+ssh-copy-id prometheus
 ```
 
-Usually means:
-- DUO push wasn't approved
-- Wrong credentials
-- Network issue
-
-### Permission denied on scripts
-
-Make scripts executable:
+Or manually:
 ```bash
-chmod +x scripts/*.sh ssh/*.sh
+cat ~/.ssh/id_ed25519.pub | ssh prometheus "mkdir -p ~/.ssh && cat >> ~/.ssh/authorized_keys"
 ```
 
-### SSH connection drops frequently
+Note: Even with SSH keys, PMACS requires DUO approval for each login.
 
-Increase keepalive settings in `~/.ssh/config`:
-```
-ServerAliveInterval 30
-ServerAliveCountMax 5
-```
+## Troubleshooting
 
-## Tips
+### "vpn-slice: command not found"
 
-### Create an alias
-
-Add to `~/.zshrc` or `~/.bashrc`:
-
+Install with sudo:
 ```bash
-alias pmacs-vpn="cd ~/path/to/pmacs-utils && ./scripts/connect.sh"
-alias pmacs-off="cd ~/path/to/pmacs-utils && ./scripts/disconnect.sh"
+sudo pip3 install vpn-slice
 ```
 
-Then: `pmacs-vpn` to connect, `pmacs-off` to disconnect.
+### "Failed to open tun device"
 
-### Auto-start on login (optional)
-
-If you always need PMACS access, create a Launch Agent:
-
-`~/Library/LaunchAgents/com.pmacs.vpn.plist`:
-```xml
-<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0">
-<dict>
-    <key>Label</key>
-    <string>com.pmacs.vpn</string>
-    <key>ProgramArguments</key>
-    <array>
-        <string>/path/to/pmacs-utils/scripts/connect.sh</string>
-    </array>
-    <key>RunAtLoad</key>
-    <true/>
-</dict>
-</plist>
+OpenConnect needs root to create the tunnel:
+```bash
+sudo openconnect ...
 ```
 
-Load with: `launchctl load ~/Library/LaunchAgents/com.pmacs.vpn.plist`
+### DUO push times out
 
-### iTerm2 Profile
+The DUO approval window is short. Have your phone ready before connecting.
 
-Create a dedicated iTerm2 profile that auto-connects:
-1. Preferences > Profiles > +
-2. Name: "PMACS"
-3. Command: `/path/to/pmacs-utils/scripts/connect.sh && ssh prometheus`
+### Connection drops frequently
 
-### VS Code Remote SSH
+PMACS has a 2-hour idle timeout. The VPN will disconnect if there's no activity.
 
-The Remote-SSH extension works with this setup. Just ensure VPN is connected first, then connect to `prometheus`.
+### "error: No tun device found"
+
+On older macOS, you may need to install a tun driver. Modern macOS (10.15+) uses utun devices natively.

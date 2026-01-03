@@ -1,213 +1,65 @@
 # PMACS Utils
 
-**Bypass PMACS's full-tunnel VPN without affecting your normal internet traffic.**
-
-PMACS requires GlobalProtect VPN to access cluster resources, but GlobalProtect routes *all* your traffic through the VPN (full tunnel). This is slow and annoying.
-
-This tool runs the VPN inside a Docker container and exposes a proxy, so only the traffic you explicitly route through it goes over the VPN. Your browser, Spotify, everything else stays on your normal connection.
+Lightweight VPN bypass for PMACS cluster access. Uses native OpenConnect with split tunneling — no Docker, no VMs.
 
 ## How It Works
 
 ```
-┌─────────────────────────────────────────────────────────────────────┐
-│  Your Computer                                                       │
-│                                                                      │
-│  ┌──────────────┐     Normal traffic      ┌──────────────────────┐  │
-│  │   Browser    │ ──────────────────────> │  Your ISP / Internet │  │
-│  │   Spotify    │                         └──────────────────────┘  │
-│  │   etc.       │                                                    │
-│  └──────────────┘                                                    │
-│                                                                      │
-│  ┌──────────────┐                         ┌──────────────────────┐  │
-│  │   Terminal   │                         │   Docker Container   │  │
-│  │              │                         │  ┌────────────────┐  │  │
-│  │  ssh prom... │ ── SOCKS5 proxy ──────> │  │  OpenConnect   │  │  │
-│  │              │    localhost:8889       │  │  VPN Client    │  │  │
-│  └──────────────┘                         │  └───────┬────────┘  │  │
-│                                           │          │           │  │
-│                                           │          │ VPN       │  │
-│                                           │          │ Tunnel    │  │
-│                                           └──────────┼───────────┘  │
-└──────────────────────────────────────────────────────┼──────────────┘
-                                                       │
-                                                       ▼
-                                            ┌──────────────────────┐
-                                            │   PMACS Network      │
-                                            │  ┌────────────────┐  │
-                                            │  │  prometheus    │  │
-                                            │  │  (cluster)     │  │
-                                            │  └────────────────┘  │
-                                            └──────────────────────┘
+Your Mac
+├── Browser, Spotify, etc. → Normal internet (unchanged)
+└── ssh prometheus         → OpenConnect tunnel → PMACS
 ```
 
-**Key insight:** The VPN runs inside Docker. Only traffic you explicitly send through the proxy (localhost:8889) goes over the VPN tunnel. Everything else on your machine is unaffected.
+Only PMACS traffic goes through the VPN. Everything else uses your normal connection.
+
+## Requirements
+
+- macOS (Windows support coming later)
+- Homebrew
+- PMACS credentials + DUO
 
 ## Quick Start
 
-### Prerequisites
-
-- [Docker Desktop](https://www.docker.com/products/docker-desktop/) (Mac, Windows, or Linux)
-- A SOCKS-capable netcat for SSH proxy:
-  - **Mac:** `brew install nmap` (provides `ncat`) — see [macOS guide](docs/MAC.md)
-  - **Linux:** Usually pre-installed (`nc` or `netcat`)
-
-### 1. Clone and Configure
-
 ```bash
+# Clone
 git clone https://github.com/drivaslab/pmacs-utils.git
 cd pmacs-utils
 
-# Create your config file
-cp .env.example .env
+# Run setup (installs dependencies, configures SSH)
+./scripts/setup.sh
 
-# Edit .env with your PMACS credentials
-# OPENCONNECT_USER=your_pennkey
-# OPENCONNECT_PASSWORD=your_password (or leave blank for prompt)
-```
-
-### 2. Set Up SSH
-
-**Option A: Automatic (Mac/Linux)**
-```bash
-./ssh/setup.sh
-```
-
-**Option B: Manual**
-Add to `~/.ssh/config`:
-```
-Host prometheus
-    HostName prometheus.pmacs.upenn.edu
-    User YOUR_USERNAME
-    ProxyCommand nc -x 127.0.0.1:8889 %h %p
-    ServerAliveInterval 60
-```
-
-Create the sockets directory:
-```bash
-mkdir -p ~/.ssh/sockets
-chmod 700 ~/.ssh/sockets
-```
-
-### 3. Connect
-
-```bash
-# Start VPN
+# Connect to VPN
 ./scripts/connect.sh
-
 # Approve DUO push on your phone
 
-# SSH to PMACS
+# SSH to cluster
 ssh prometheus
 ```
 
-### 4. Disconnect
+## Scripts
 
-```bash
-./scripts/disconnect.sh
-```
+| Script | Purpose |
+|--------|---------|
+| `scripts/setup.sh` | One-time setup: install deps, configure SSH, generate keys |
+| `scripts/connect.sh` | Start VPN connection |
+| `scripts/disconnect.sh` | Stop VPN connection |
 
-## Commands
+## What Gets Installed
 
-| Script | Description |
-|--------|-------------|
-| `./scripts/connect.sh` | Start VPN container and wait for proxy |
-| `./scripts/disconnect.sh` | Stop VPN container |
-| `./scripts/status.sh` | Check VPN and proxy status |
+- **openconnect** — Open-source VPN client (via Homebrew)
+- **vpn-slice** — Split-tunnel routing (via pip)
 
-**Windows (PowerShell):**
-```powershell
-.\scripts\connect.ps1
-.\scripts\disconnect.ps1
-.\scripts\status.ps1
-```
+## Platform Support
 
-## Configuration
-
-### .env File
-
-| Variable | Required | Description |
-|----------|----------|-------------|
-| `OPENCONNECT_URL` | Yes | VPN gateway (default: `psomvpn.uphs.upenn.edu`) |
-| `OPENCONNECT_USER` | Yes | Your PMACS username |
-| `OPENCONNECT_PASSWORD` | No | Leave blank to enter interactively |
-| `OPENCONNECT_MFA_CODE` | No | `push` for DUO, or TOTP code |
-| `OPENCONNECT_OPTIONS` | No | Additional OpenConnect flags |
-
-### Proxy Ports
-
-| Port | Protocol | Use For |
-|------|----------|---------|
-| 8889 | SOCKS5 | SSH, general TCP |
-| 8888 | HTTP | Browsers, curl |
+| Platform | Status |
+|----------|--------|
+| macOS | Supported |
+| Windows | Coming soon (WSL-based) |
+| Linux | Should work, untested |
 
 ## Troubleshooting
 
-### "Connection refused" on port 8889
-
-VPN container isn't running or hasn't connected yet:
-```bash
-./scripts/status.sh       # Check status
-docker logs pmacs-vpn     # View VPN logs
-```
-
-### DUO push not arriving
-
-Check container logs for the authentication prompt:
-```bash
-docker logs -f pmacs-vpn
-```
-
-### "nc: invalid option -- 'x'"
-
-Your system has BSD netcat which lacks SOCKS proxy support.
-
-**Mac (recommended):**
-```bash
-brew install nmap
-```
-Then update `~/.ssh/config` to use ncat:
-```
-ProxyCommand ncat --proxy 127.0.0.1:8889 --proxy-type socks5 %h %p
-```
-
-See the [macOS guide](docs/MAC.md) for more options.
-
-### SSH connection hangs
-
-1. Verify VPN is connected: `./scripts/status.sh`
-2. Test proxy directly: `curl --proxy socks5h://127.0.0.1:8889 http://prometheus.pmacs.upenn.edu`
-3. Check container logs: `docker logs pmacs-vpn`
-
-### Docker not running
-
-Start Docker Desktop, then try again.
-
-## Platform Notes
-
-See detailed guides:
-- [Windows Setup](docs/WINDOWS.md)
-- [macOS Setup](docs/MAC.md)
-
-## How This Compares to Official GlobalProtect
-
-| Aspect | Official GlobalProtect | This Tool |
-|--------|------------------------|-----------|
-| Tunnel type | Full tunnel (all traffic) | Split tunnel (only what you route) |
-| Internet speed | Slower (through VPN) | Normal speed |
-| Privacy | All traffic visible to PMACS | Only PMACS traffic visible |
-| Setup | Install app + connect | Docker + one-time SSH config |
-| Disconnect to browse | Yes | No |
-
-## Security Notes
-
-- Your PMACS credentials are stored in `.env` (git-ignored)
-- The Docker container runs privileged (required for VPN tunnel creation)
-- Only localhost can access the proxy ports (bound to 127.0.0.1)
-- VPN traffic is encrypted the same as official GlobalProtect
-
-## Contributing
-
-PRs welcome. Please test on your platform before submitting.
+See [docs/MAC.md](docs/MAC.md) for detailed macOS instructions and common issues.
 
 ## License
 

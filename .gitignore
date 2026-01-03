@@ -1,20 +1,14 @@
-# Credentials - NEVER commit
+# Config files with credentials
 .env
+config
 
-# Editor/IDE
-.idea/
-.vscode/
+# macOS
+.DS_Store
+
+# Editor
 *.swp
 *.swo
 *~
 
-# OS files
-.DS_Store
-Thumbs.db
-
-# Logs
-*.log
-logs/
-
-# Local overrides
-docker-compose.override.yml
+# development tooling
+.development tooling/
