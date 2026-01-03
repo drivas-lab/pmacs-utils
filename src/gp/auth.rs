@@ -183,9 +183,139 @@ pub async fn prelogin(gateway: &str) -> Result<PreloginResponse, AuthError> {
     })
 }
 
+/// Challenge response from first login step (MFA required)
+#[derive(Debug)]
+struct ChallengeResponse {
+    input_str: String,
+    message: String,
+}
+
+/// Parse HTML challenge response
+/// Format: var respStatus = "Challenge"; var respMsg = "..."; thisForm.inputStr.value = "...";
+fn parse_challenge(body: &str) -> Option<ChallengeResponse> {
+    // Check if this is a challenge response
+    if !body.contains("respStatus = \"Challenge\"") {
+        return None;
+    }
+
+    // Extract inputStr value using regex-like parsing
+    let input_str = body
+        .find("inputStr.value = \"")
+        .and_then(|start| {
+            let rest = &body[start + 18..];
+            rest.find('"').map(|end| rest[..end].to_string())
+        })?;
+
+    // Extract message
+    let message = body
+        .find("respMsg = \"")
+        .and_then(|start| {
+            let rest = &body[start + 11..];
+            rest.find('"').map(|end| rest[..end].to_string())
+        })
+        .unwrap_or_else(|| "Enter passcode".to_string());
+
+    Some(ChallengeResponse { input_str, message })
+}
+
+/// Parse JNLP login response
+/// Handles both labeled format: (auth-cookie), value, (portal), value, ...
+/// And positional format: empty, cookie, persistent-cookie, gateway, user, profile, vsys, domain, ...
+fn parse_jnlp_response(body: &str, username: &str, gateway: &str) -> Result<LoginResponse, AuthError> {
+    let jnlp: JnlpXml = quick_xml::de::from_str(body)
+        .map_err(|e| AuthError::AuthFailed(format!("Invalid login response: {}", e)))?;
+
+    let args = &jnlp.application_desc.argument;
+
+    if args.is_empty() {
+        return Err(AuthError::InvalidResponse);
+    }
+
+    // Check if this is labeled format (first non-empty arg starts with "(")
+    let is_labeled = args.iter().any(|a| a.starts_with('('));
+
+    if is_labeled {
+        // Labeled format: key-value pairs like (auth-cookie), value
+        let mut auth_cookie = None;
+        let mut portal = None;
+        let mut domain = None;
+        let mut gateway_address = None;
+
+        let mut i = 0;
+        while i < args.len() {
+            let key = &args[i];
+            if i + 1 < args.len() {
+                let value = &args[i + 1];
+                match key.as_str() {
+                    "(auth-cookie)" => auth_cookie = Some(value.clone()),
+                    "(portal)" => portal = Some(value.clone()),
+                    "(domain)" => domain = Some(value.clone()),
+                    "(gateway-address)" => gateway_address = Some(value.clone()),
+                    _ => {}
+                }
+            }
+            i += 2;
+        }
+
+        Ok(LoginResponse {
+            auth_cookie: auth_cookie.ok_or_else(|| AuthError::MissingField("auth-cookie".to_string()))?,
+            username: username.to_string(),
+            domain: domain.unwrap_or_default(),
+            portal: portal.unwrap_or_else(|| gateway.to_string()),
+            gateway_address: gateway_address.unwrap_or_else(|| gateway.to_string()),
+        })
+    } else {
+        // Positional format from PMACS-style servers:
+        // [0]: empty or user
+        // [1]: auth-cookie (32 hex chars)
+        // [2]: persistent-cookie (40 hex chars, anti-MITM)
+        // [3]: gateway name
+        // [4]: username
+        // [5]: auth profile
+        // [6]: vsys
+        // [7]: domain
+        debug!("Parsing positional JNLP format with {} arguments", args.len());
+
+        // Auth cookie is at index 1 (32 hex chars)
+        let auth_cookie = args.get(1)
+            .filter(|s| !s.is_empty() && s.len() == 32 && s.chars().all(|c| c.is_ascii_hexdigit()))
+            .cloned()
+            .ok_or_else(|| AuthError::MissingField("auth-cookie at index 1".to_string()))?;
+
+        // Gateway at index 3
+        let gateway_name = args.get(3)
+            .filter(|s| !s.is_empty())
+            .cloned()
+            .unwrap_or_else(|| gateway.to_string());
+
+        // Username at index 4 (or use provided)
+        let user = args.get(4)
+            .filter(|s| !s.is_empty())
+            .cloned()
+            .unwrap_or_else(|| username.to_string());
+
+        // Domain at index 7
+        let domain = args.get(7)
+            .filter(|s| !s.is_empty())
+            .cloned()
+            .unwrap_or_default();
+
+        Ok(LoginResponse {
+            auth_cookie,
+            username: user,
+            domain,
+            portal: gateway.to_string(),
+            gateway_address: gateway_name,
+        })
+    }
+}
+
 /// Step 2: Authenticate with username/password
 ///
-/// For DUO MFA, use passcode="push" to trigger a push notification
+/// For DUO MFA, use passcode="push" to trigger a push notification.
+/// This handles the two-step challenge flow:
+/// 1. First request with password → returns Challenge with token
+/// 2. Second request with token + passcode → returns auth cookie
 ///
 /// # Arguments
 /// * `gateway` - Gateway hostname
@@ -205,6 +335,7 @@ pub async fn login(
 
     let client = Client::builder()
         .danger_accept_invalid_certs(false)
+        .cookie_store(true)  // Maintain session cookies for MFA flow
         .build()?;
 
     let url = format!("https://{}/ssl-vpn/login.esp", gateway);
@@ -214,19 +345,25 @@ pub async fn login(
         .and_then(|h| h.into_string().ok())
         .unwrap_or_else(|| "unknown".to_string());
 
-    let mut params: HashMap<&str, String> = [
+    // First request: send credentials
+    // Required params per GP protocol doc: user, passwd, ok=Login, jnlpReady, direct, server, etc.
+    let params: HashMap<&str, String> = [
         ("user", username.to_string()),
         ("passwd", password.to_string()),
-        ("computer", hostname),
-        ("os-version", "Windows".to_string()),
+        ("jnlpReady", "jnlpReady".to_string()),  // Required!
+        ("ok", "Login".to_string()),              // Required!
+        ("direct", "yes".to_string()),            // Required!
+        ("prot", "https:".to_string()),
+        ("server", gateway.to_string()),
+        ("computer", hostname.clone()),
+        ("os-version", "Microsoft Windows 10 Pro".to_string()),
+        ("clientos", "Windows".to_string()),
+        ("clientVer", "4100".to_string()),
+        ("ipv6-support", "yes".to_string()),
     ]
     .iter()
     .cloned()
     .collect();
-
-    if let Some(code) = passcode {
-        params.insert("passcode", code.to_string());
-    }
 
     let response = client
         .post(&url)
@@ -238,53 +375,126 @@ pub async fn login(
     let body = response.text().await?;
     debug!("Login response: {}", body);
 
-    let jnlp: JnlpXml = quick_xml::de::from_str(&body)
-        .map_err(|e| AuthError::AuthFailed(format!("Invalid login response: {}", e)))?;
+    // Check if this is a challenge response (MFA required)
+    if let Some(challenge) = parse_challenge(&body) {
+        info!("MFA challenge received: {}", challenge.message);
 
-    // Parse the JNLP arguments which come as key-value pairs
-    let args = &jnlp.application_desc.argument;
-    let mut auth_cookie = None;
-    let mut portal = None;
-    let mut domain = None;
-    let mut gateway_address = None;
+        // Second request: send challenge token with passcode in passwd field
+        // For DUO push, the server will block until the user approves
+        let passcode = passcode.unwrap_or("push");
+        info!("Sending MFA response with passcode: {} (waiting for approval...)", passcode);
 
-    let mut i = 0;
-    while i < args.len() {
-        let key = &args[i];
-        if i + 1 < args.len() {
-            let value = &args[i + 1];
-            match key.as_str() {
-                "(auth-cookie)" => auth_cookie = Some(value.clone()),
-                "(portal)" => portal = Some(value.clone()),
-                "(domain)" => domain = Some(value.clone()),
-                "(gateway-address)" => gateway_address = Some(value.clone()),
-                _ => {}
-            }
+        let challenge_params: HashMap<&str, String> = [
+            ("user", username.to_string()),
+            ("passwd", passcode.to_string()),  // Passcode goes in passwd field for MFA step
+            ("inputStr", challenge.input_str),
+            ("jnlpReady", "jnlpReady".to_string()),  // Required!
+            ("ok", "Login".to_string()),              // Required!
+            ("direct", "yes".to_string()),            // Required!
+            ("prot", "https:".to_string()),
+            ("server", gateway.to_string()),
+            ("computer", hostname.clone()),
+            ("os-version", "Microsoft Windows 10 Pro".to_string()),
+            ("clientos", "Windows".to_string()),
+            ("clientVer", "4100".to_string()),
+            ("ipv6-support", "yes".to_string()),
+        ]
+        .iter()
+        .cloned()
+        .collect();
+
+        let challenge_response = client
+            .post(&url)
+            .header("User-Agent", "PAN GlobalProtect")
+            .form(&challenge_params)
+            .send()
+            .await?;
+
+        debug!("MFA response status: {}", challenge_response.status());
+        debug!("MFA response headers: {:?}", challenge_response.headers());
+
+        let challenge_body = challenge_response.text().await?;
+        debug!("MFA response body: {}", challenge_body);
+
+        // Check for error response
+        if challenge_body.contains("respStatus = \"Error\"") {
+            // Extract error message
+            let msg = challenge_body
+                .find("respMsg = \"")
+                .and_then(|start| {
+                    let rest = &challenge_body[start + 11..];
+                    rest.find('"').map(|end| rest[..end].to_string())
+                })
+                .unwrap_or_else(|| "Unknown error".to_string());
+            return Err(AuthError::AuthFailed(format!("MFA failed: {}", msg)));
         }
-        i += 2;
+
+        // Check for another challenge (wrong passcode, etc.)
+        if let Some(retry_challenge) = parse_challenge(&challenge_body) {
+            return Err(AuthError::AuthFailed(format!(
+                "MFA failed: {}",
+                retry_challenge.message
+            )));
+        }
+
+        // If empty response with 200 OK, MFA succeeded but we need to retry login
+        // to get the actual JNLP response
+        if challenge_body.is_empty() {
+            info!("MFA accepted, completing login...");
+
+            // Retry login with original credentials - session is now MFA-validated
+            let retry_params: HashMap<&str, String> = [
+                ("user", username.to_string()),
+                ("passwd", password.to_string()),
+                ("jnlpReady", "jnlpReady".to_string()),
+                ("ok", "Login".to_string()),
+                ("direct", "yes".to_string()),
+                ("prot", "https:".to_string()),
+                ("server", gateway.to_string()),
+                ("computer", hostname),
+                ("os-version", "Microsoft Windows 10 Pro".to_string()),
+                ("clientos", "Windows".to_string()),
+                ("clientVer", "4100".to_string()),
+                ("ipv6-support", "yes".to_string()),
+            ]
+            .iter()
+            .cloned()
+            .collect();
+
+            let retry_response = client
+                .post(&url)
+                .header("User-Agent", "PAN GlobalProtect")
+                .form(&retry_params)
+                .send()
+                .await?;
+
+            debug!("Retry login status: {}", retry_response.status());
+
+            let retry_body = retry_response.text().await?;
+            debug!("Retry login body: {}", retry_body);
+
+            return parse_jnlp_response(&retry_body, username, gateway);
+        }
+
+        return parse_jnlp_response(&challenge_body, username, gateway);
     }
 
-    Ok(LoginResponse {
-        auth_cookie: auth_cookie.ok_or_else(|| AuthError::MissingField("auth-cookie".to_string()))?,
-        username: username.to_string(),
-        domain: domain.unwrap_or_else(|| "".to_string()),
-        portal: portal.unwrap_or_else(|| gateway.to_string()),
-        gateway_address: gateway_address.unwrap_or_else(|| gateway.to_string()),
-    })
+    // No challenge - parse as JNLP directly
+    parse_jnlp_response(&body, username, gateway)
 }
 
 /// Step 3: Get tunnel configuration
 ///
 /// # Arguments
 /// * `gateway` - Gateway hostname
-/// * `auth_cookie` - Authentication cookie from login
+/// * `login` - Login response containing auth cookie and user info
 /// * `preferred_ip` - Optional preferred IP address
 ///
 /// # Returns
 /// Tunnel configuration with IP, DNS, MTU settings
 pub async fn getconfig(
     gateway: &str,
-    auth_cookie: &str,
+    login: &LoginResponse,
     preferred_ip: Option<IpAddr>,
 ) -> Result<TunnelConfig, AuthError> {
     info!("Getting tunnel configuration");
@@ -295,18 +505,30 @@ pub async fn getconfig(
 
     let url = format!("https://{}/ssl-vpn/getconfig.esp", gateway);
 
+    let hostname = hostname::get()
+        .ok()
+        .and_then(|h| h.into_string().ok())
+        .unwrap_or_else(|| "unknown".to_string());
+
     let preferred = preferred_ip
         .map(|ip| ip.to_string())
         .unwrap_or_else(|| "0.0.0.0".to_string());
 
+    // Full parameter set per GP protocol doc
     let params = [
-        ("user", ""),
-        ("portal", gateway),
-        ("authcookie", auth_cookie),
-        ("preferred-ip", &preferred),
+        ("user", login.username.as_str()),
+        ("portal", login.portal.as_str()),
+        ("domain", login.domain.as_str()),
+        ("authcookie", login.auth_cookie.as_str()),
+        ("preferred-ip", preferred.as_str()),
+        ("clientos", "Windows"),
+        ("os-version", "Microsoft Windows 10 Pro"),
+        ("app-version", "4.1.0-10"),
+        ("protocol-version", "p1"),
         ("client-type", "1"),
-        ("os-version", "Windows"),
-        ("app-version", "4.1.0"),
+        ("enc-algo", "aes-256-gcm,aes-128-gcm,aes-128-cbc"),
+        ("hmac-algo", "sha1"),
+        ("computer", hostname.as_str()),
     ];
 
     let response = client
@@ -425,6 +647,33 @@ mod tests {
     }
 
     #[test]
+    fn test_parse_positional_jnlp_response() {
+        // PMACS-style positional format (no labels)
+        let xml = r#"<?xml version="1.0" encoding="UTF-8" ?>
+<jnlp>
+<application-desc>
+<argument></argument>
+<argument>ec85fe94925569dbaf7f38bfe736da90</argument>
+<argument>651e643201afcb354d58b58d9412f3a168db1fa4</argument>
+<argument>psom_admin_vpn_gateway-N</argument>
+<argument>yjk</argument>
+<argument>PSOM_DUO_profile_GP</argument>
+<argument>vsys1</argument>
+<argument>pmacs</argument>
+<argument></argument>
+</application-desc>
+</jnlp>"#;
+
+        let result = parse_jnlp_response(xml, "yjk", "psomvpn.uphs.upenn.edu");
+        assert!(result.is_ok(), "Failed to parse: {:?}", result);
+        let login = result.unwrap();
+        assert_eq!(login.auth_cookie, "ec85fe94925569dbaf7f38bfe736da90");
+        assert_eq!(login.username, "yjk");
+        assert_eq!(login.domain, "pmacs");
+        assert_eq!(login.gateway_address, "psom_admin_vpn_gateway-N");
+    }
+
+    #[test]
     fn test_parse_getconfig_response() {
         let xml = r#"
             <policy>
@@ -443,5 +692,30 @@ mod tests {
         assert_eq!(policy.mtu, Some("1400".to_string()));
         assert!(policy.dns.is_some());
         assert_eq!(policy.dns.unwrap().member.len(), 2);
+    }
+
+    #[test]
+    fn test_parse_challenge_response() {
+        let html = r#"<html>
+  <head></head>
+  <body>
+  var respStatus = "Challenge";
+  var respMsg = "Enter passcode:";
+  thisForm.inputStr.value = "691e86260039364e";
+</body>
+</html>"#;
+
+        let challenge = parse_challenge(html);
+        assert!(challenge.is_some());
+        let challenge = challenge.unwrap();
+        assert_eq!(challenge.input_str, "691e86260039364e");
+        assert_eq!(challenge.message, "Enter passcode:");
+    }
+
+    #[test]
+    fn test_parse_non_challenge_response() {
+        let xml = r#"<jnlp><application-desc></application-desc></jnlp>"#;
+        let challenge = parse_challenge(xml);
+        assert!(challenge.is_none());
     }
 }
