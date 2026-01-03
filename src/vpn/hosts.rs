@@ -96,3 +96,188 @@ impl Default for HostsManager {
         Self::new()
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::net::{Ipv4Addr, Ipv6Addr};
+    use tempfile::TempDir;
+
+    fn create_test_manager(temp_dir: &TempDir, filename: &str, content: &str) -> HostsManager {
+        let path = temp_dir.path().join(filename);
+        fs::write(&path, content).unwrap();
+        HostsManager::with_path(path.to_string_lossy().to_string())
+    }
+
+    #[test]
+    fn test_default_path_unix() {
+        let manager = HostsManager::new();
+        if cfg!(unix) {
+            assert_eq!(manager.path, "/etc/hosts");
+        }
+    }
+
+    #[test]
+    fn test_with_path() {
+        let manager = HostsManager::with_path("/custom/path".to_string());
+        assert_eq!(manager.path, "/custom/path");
+    }
+
+    #[test]
+    fn test_update_content_adds_section() {
+        let manager = HostsManager::with_path(String::new());
+        let original = "127.0.0.1\tlocalhost\n";
+
+        let mut entries = HashMap::new();
+        entries.insert(
+            "test.example.com".to_string(),
+            IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)),
+        );
+
+        let result = manager.update_content(original, &entries);
+
+        assert!(result.contains("127.0.0.1\tlocalhost"));
+        assert!(result.contains("# BEGIN pmacs-vpn"));
+        assert!(result.contains("10.0.0.1\ttest.example.com"));
+        assert!(result.contains("# END pmacs-vpn"));
+    }
+
+    #[test]
+    fn test_update_content_empty_entries() {
+        let manager = HostsManager::with_path(String::new());
+        let original = "127.0.0.1\tlocalhost\n";
+
+        let entries = HashMap::new();
+        let result = manager.update_content(original, &entries);
+
+        assert!(result.contains("127.0.0.1\tlocalhost"));
+        assert!(!result.contains("# BEGIN pmacs-vpn"));
+        assert!(!result.contains("# END pmacs-vpn"));
+    }
+
+    #[test]
+    fn test_update_content_replaces_existing_section() {
+        let manager = HostsManager::with_path(String::new());
+        let original = "127.0.0.1\tlocalhost\n\
+                        # BEGIN pmacs-vpn\n\
+                        10.0.0.1\told.example.com\n\
+                        # END pmacs-vpn\n\
+                        ::1\tlocalhost\n";
+
+        let mut entries = HashMap::new();
+        entries.insert(
+            "new.example.com".to_string(),
+            IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2)),
+        );
+
+        let result = manager.update_content(original, &entries);
+
+        assert!(result.contains("127.0.0.1\tlocalhost"));
+        assert!(result.contains("::1\tlocalhost"));
+        assert!(!result.contains("old.example.com"));
+        assert!(result.contains("10.0.0.2\tnew.example.com"));
+    }
+
+    #[test]
+    fn test_remove_managed_section() {
+        let manager = HostsManager::with_path(String::new());
+        let content = "127.0.0.1\tlocalhost\n\
+                       # BEGIN pmacs-vpn\n\
+                       10.0.0.1\ttest.example.com\n\
+                       # END pmacs-vpn\n\
+                       ::1\tlocalhost\n";
+
+        let result = manager.remove_managed_section(content);
+
+        assert!(result.contains("127.0.0.1\tlocalhost"));
+        assert!(result.contains("::1\tlocalhost"));
+        assert!(!result.contains("# BEGIN pmacs-vpn"));
+        assert!(!result.contains("test.example.com"));
+        assert!(!result.contains("# END pmacs-vpn"));
+    }
+
+    #[test]
+    fn test_remove_managed_section_no_section() {
+        let manager = HostsManager::with_path(String::new());
+        let content = "127.0.0.1\tlocalhost\n::1\tlocalhost\n";
+
+        let result = manager.remove_managed_section(content);
+
+        assert!(result.contains("127.0.0.1\tlocalhost"));
+        assert!(result.contains("::1\tlocalhost"));
+    }
+
+    #[test]
+    fn test_add_entries_file_operations() {
+        let temp_dir = TempDir::new().unwrap();
+        let original_content = "127.0.0.1\tlocalhost\n";
+        let manager = create_test_manager(&temp_dir, "hosts", original_content);
+
+        let mut entries = HashMap::new();
+        entries.insert(
+            "test.example.com".to_string(),
+            IpAddr::V4(Ipv4Addr::new(192, 168, 1, 100)),
+        );
+
+        manager.add_entries(&entries).unwrap();
+
+        let content = fs::read_to_string(&manager.path).unwrap();
+        assert!(content.contains("# BEGIN pmacs-vpn"));
+        assert!(content.contains("192.168.1.100\ttest.example.com"));
+        assert!(content.contains("# END pmacs-vpn"));
+    }
+
+    #[test]
+    fn test_remove_entries_file_operations() {
+        let temp_dir = TempDir::new().unwrap();
+        let original_content = "127.0.0.1\tlocalhost\n\
+                                # BEGIN pmacs-vpn\n\
+                                10.0.0.1\ttest.example.com\n\
+                                # END pmacs-vpn\n";
+        let manager = create_test_manager(&temp_dir, "hosts", original_content);
+
+        manager.remove_entries().unwrap();
+
+        let content = fs::read_to_string(&manager.path).unwrap();
+        assert!(content.contains("127.0.0.1\tlocalhost"));
+        assert!(!content.contains("# BEGIN pmacs-vpn"));
+        assert!(!content.contains("test.example.com"));
+    }
+
+    #[test]
+    fn test_ipv6_address() {
+        let manager = HostsManager::with_path(String::new());
+        let original = "127.0.0.1\tlocalhost\n";
+
+        let mut entries = HashMap::new();
+        entries.insert(
+            "ipv6.example.com".to_string(),
+            IpAddr::V6(Ipv6Addr::new(0x2001, 0xdb8, 0, 0, 0, 0, 0, 1)),
+        );
+
+        let result = manager.update_content(original, &entries);
+
+        assert!(result.contains("2001:db8::1\tipv6.example.com"));
+    }
+
+    #[test]
+    fn test_multiple_entries() {
+        let manager = HostsManager::with_path(String::new());
+        let original = "127.0.0.1\tlocalhost\n";
+
+        let mut entries = HashMap::new();
+        entries.insert(
+            "host1.example.com".to_string(),
+            IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)),
+        );
+        entries.insert(
+            "host2.example.com".to_string(),
+            IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2)),
+        );
+
+        let result = manager.update_content(original, &entries);
+
+        assert!(result.contains("10.0.0.1\thost1.example.com"));
+        assert!(result.contains("10.0.0.2\thost2.example.com"));
+    }
+}
