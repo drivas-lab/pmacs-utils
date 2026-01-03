@@ -26,6 +26,7 @@ Toolkit for streamlined PMACS cluster access via split-tunnel VPN.
 |-----|---------|
 | [docs/pmacs-environment.md](docs/pmacs-environment.md) | PMACS hosts, VPN details, SSH config |
 | [docs/vpn-slice-analysis.md](docs/vpn-slice-analysis.md) | How vpn-slice works, what we need |
+| [docs/rust-claude-guide.md](docs/rust-claude-guide.md) | Rust development best practices with Claude |
 
 ## Quick Reference
 
