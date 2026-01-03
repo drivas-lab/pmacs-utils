@@ -1,5 +1,5 @@
 use clap::{Parser, Subcommand};
-use tracing::{info, Level};
+use tracing::{error, info, Level};
 use tracing_subscriber::FmtSubscriber;
 
 #[derive(Parser)]
@@ -29,6 +29,13 @@ enum Commands {
     Status,
     /// Generate default config file
     Init,
+    /// Script mode for OpenConnect integration
+    ///
+    /// This command is called by OpenConnect with environment variables
+    /// describing the VPN connection. Do not call this directly.
+    ///
+    /// Usage: sudo openconnect ... -s 'pmacs-vpn script'
+    Script,
 }
 
 #[tokio::main]
@@ -36,6 +43,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let cli = Cli::parse();
 
     // Set up logging
+    // Script mode uses stderr to avoid interfering with OpenConnect
     let level = if cli.verbose {
         Level::DEBUG
     } else {
@@ -44,6 +52,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let subscriber = FmtSubscriber::builder()
         .with_max_level(level)
         .with_target(false)
+        .with_writer(std::io::stderr)
         .finish();
     tracing::subscriber::set_global_default(subscriber)?;
 
@@ -53,18 +62,35 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             if let Some(username) = user {
                 info!("Using username: {}", username);
             }
-            // TODO: Implement connection logic
+            // TODO: Implement connection logic (spawn OpenConnect)
             println!("Connect command not yet implemented");
+            println!("For now, use: sudo openconnect psomvpn.uphs.upenn.edu --protocol=gp -u USERNAME -s 'pmacs-vpn script'");
         }
         Commands::Disconnect => {
             info!("Disconnecting from PMACS VPN...");
-            // TODO: Implement disconnect logic
+            // TODO: Implement disconnect logic (kill OpenConnect, cleanup)
             println!("Disconnect command not yet implemented");
         }
         Commands::Status => {
             info!("Checking VPN status...");
-            // TODO: Implement status check
-            println!("Status command not yet implemented");
+            if pmacs_vpn::VpnState::is_active() {
+                match pmacs_vpn::VpnState::load() {
+                    Ok(Some(state)) => {
+                        println!("VPN Status: Connected");
+                        println!("  Tunnel: {}", state.tunnel_device);
+                        println!("  Gateway: {}", state.gateway);
+                        println!("  Routes: {}", state.routes.len());
+                        for route in &state.routes {
+                            println!("    {} -> {}", route.hostname, route.ip);
+                        }
+                        println!("  Hosts entries: {}", state.hosts_entries.len());
+                    }
+                    Ok(None) => println!("VPN Status: Not connected"),
+                    Err(e) => println!("Error reading state: {}", e),
+                }
+            } else {
+                println!("VPN Status: Not connected");
+            }
         }
         Commands::Init => {
             info!("Generating default config...");
@@ -72,6 +98,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             let path = std::path::PathBuf::from("pmacs-vpn.toml");
             config.save(&path)?;
             println!("Created default config: pmacs-vpn.toml");
+        }
+        Commands::Script => {
+            // Script mode - called by OpenConnect
+            match pmacs_vpn::handle_script_mode() {
+                Ok(()) => {
+                    info!("Script completed successfully");
+                }
+                Err(e) => {
+                    error!("Script failed: {}", e);
+                    std::process::exit(1);
+                }
+            }
         }
     }
 
