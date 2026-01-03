@@ -191,6 +191,16 @@ impl TrayApp {
                         }
                     } else if event.id == exit_id {
                         info!("Tray: Exit clicked");
+
+                        // Kill daemon synchronously before exiting
+                        // (can't rely on async handler - event loop exits immediately)
+                        if let Ok(Some(state)) = crate::VpnState::load() {
+                            if state.pid.is_some() && state.is_daemon_running() {
+                                info!("Killing VPN daemon before exit");
+                                let _ = state.kill_daemon();
+                            }
+                        }
+
                         let _ = command_tx.send(TrayCommand::Exit);
                         *control_flow = ControlFlow::Exit;
                     }
@@ -204,6 +214,35 @@ impl TrayApp {
                         // Only handle error notifications here (not sent elsewhere)
                         if let VpnStatus::Error(msg) = &status {
                             notifications::notify_error(msg);
+                        }
+
+                        // Update menu items based on status
+                        match &status {
+                            VpnStatus::Disconnected => {
+                                let _ = status_item.set_text("Status: Disconnected");
+                                connect_item.set_enabled(true);
+                                disconnect_item.set_enabled(false);
+                            }
+                            VpnStatus::Connecting => {
+                                let _ = status_item.set_text("Status: Connecting...");
+                                connect_item.set_enabled(false);
+                                disconnect_item.set_enabled(false);
+                            }
+                            VpnStatus::Connected { ip } => {
+                                let _ = status_item.set_text(&format!("Status: Connected ({})", ip));
+                                connect_item.set_enabled(false);
+                                disconnect_item.set_enabled(true);
+                            }
+                            VpnStatus::Disconnecting => {
+                                let _ = status_item.set_text("Status: Disconnecting...");
+                                connect_item.set_enabled(false);
+                                disconnect_item.set_enabled(false);
+                            }
+                            VpnStatus::Error(_) => {
+                                let _ = status_item.set_text("Status: Error");
+                                connect_item.set_enabled(true);
+                                disconnect_item.set_enabled(false);
+                            }
                         }
 
                         current_status = status.clone();
