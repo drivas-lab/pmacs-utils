@@ -1,151 +1,89 @@
 # Implementation Checklist
 
-## Current State
+## Current Status: Ready for Integration Testing
 
-✅ Project scaffold with CLI
-✅ Config module (load/save TOML)
-✅ Platform routing managers (macOS/Linux/Windows)
-✅ VPN routing with DNS resolution
-✅ Hosts file management
-✅ Unit tests (41 tests passing)
-✅ **OpenConnect script mode (P1 complete)**
+**Approach:** Native GlobalProtect (no OpenConnect dependency)
 
 ---
 
-## Priority 1: Core Functionality (MVP) ✅ COMPLETE
+## Completed
 
-### P1.1: OpenConnect Script Mode ✅
-- [x] Parse OpenConnect environment variables (`TUNDEV`, `INTERNAL_IP4_DNS`, `VPNGATEWAY`, `reason`)
-- [x] Implement `connect` handler (configure tunnel, add routes, update hosts)
-- [x] Implement `disconnect` handler (cleanup routes, restore hosts)
-- [x] Add `script` CLI command for OpenConnect to invoke us
+### Core Implementation ✅
+- [x] GlobalProtect auth flow (prelogin, login, getconfig)
+- [x] DUO MFA support (passcode="push")
+- [x] SSL tunnel establishment
+- [x] Packet framing (GP protocol)
+- [x] Cross-platform TUN device (tun crate)
+- [x] Embedded wintun.dll for Windows
+- [x] Bidirectional packet I/O
+- [x] Keepalive handling
 
-### P1.2: VPN DNS Resolution ✅
-- [x] Use VPN's DNS server (`INTERNAL_IP4_DNS`) for hostname resolution
-- [x] Cache resolved IPs in state for disconnect cleanup
-- [ ] Fall back to system DNS if VPN DNS fails (deferred - not critical)
+### Platform Support ✅
+- [x] macOS routing (`route -n add -host`)
+- [x] Linux routing (`ip route add`)
+- [x] Windows routing (`route add`)
+- [x] Hosts file management (platform-aware paths)
 
-### P1.3: macOS Route Commands ✅
-- [x] Update `MacRoutingManager` to use `-interface <tundev>` syntax
-- [x] Handle route conflicts (route already exists)
-- [ ] Test with actual VPN tunnel device (requires VPN credentials)
+### CLI ✅
+- [x] `pmacs-vpn connect -u USERNAME`
+- [x] `pmacs-vpn disconnect`
+- [x] `pmacs-vpn status`
+- [x] `pmacs-vpn init` (create config)
+- [x] Ctrl+C signal handling
 
-### P1.4: State Persistence ✅
-- [x] Track active routes/hosts in state file (`~/.pmacs-vpn/state.json`)
-- [x] Enable cleanup even if process crashes
-- [x] Implement `status` command to show active state
-
----
-
-## Priority 2: User Experience
-
-Make it pleasant to use.
-
-### P2.1: Connect Command (Wrapper Mode)
-- [ ] Spawn OpenConnect with our binary as the script
-- [ ] Pass through username (`-u` flag)
-- [ ] Handle authentication prompts (password, DUO)
-- [ ] Show connection progress
-
-### P2.2: Disconnect Command
-- [ ] Find running OpenConnect process
-- [ ] Send SIGTERM for graceful shutdown
-- [ ] Verify cleanup completed
-
-### P2.3: Status Command
-- [ ] Show VPN connection status
-- [ ] List active routes
-- [ ] List managed hosts entries
-- [ ] Show tunnel device info
-
-### P2.4: Error Messages
-- [ ] Clear error messages for common failures
-- [ ] Suggest fixes (e.g., "run with sudo", "check VPN credentials")
-- [ ] Verbose mode (`-v`) for debugging
+### Code Quality ✅
+- [x] 54 unit tests passing
+- [x] Clippy clean (no warnings)
+- [x] Builds on Windows, Mac, Linux
 
 ---
 
-## Priority 3: Robustness
+## Needs Integration Testing
 
-Handle edge cases and failures gracefully.
-
-### P3.1: Privilege Handling
-- [ ] Detect if running as root (required for routes)
-- [ ] Provide clear message if not root
-- [ ] Consider sudo wrapper or setuid approaches
-
-### P3.2: Cleanup Guarantees
-- [ ] Signal handlers (SIGTERM, SIGINT) for graceful cleanup
-- [ ] Orphan cleanup on startup (leftover state from crash)
-- [ ] Atomic hosts file updates (write to temp, rename)
-
-### P3.3: Reconnect Handling
-- [ ] Handle `reconnect` reason from OpenConnect
-- [ ] Preserve routes across brief disconnects
-- [ ] Update routes if IPs changed
+- [ ] Full auth flow against `psomvpn.uphs.upenn.edu`
+- [ ] DUO push approval flow
+- [ ] SSL tunnel data transfer
+- [ ] SSH through tunnel to `prometheus.pmacs.upenn.edu`
+- [ ] Clean disconnect and cleanup
 
 ---
 
-## Priority 4: Cross-Platform
+## Future Enhancements (Post-MVP)
 
-Extend to Linux and Windows.
+### Robustness
+- [ ] Privilege check at startup (require admin/root)
+- [ ] Orphan state cleanup on startup
+- [ ] Session refresh before timeout
+- [ ] Reconnect handling
 
-### P4.1: Linux Support
-- [ ] Test `ip route` commands on Linux
-- [ ] Handle different tunnel device naming (`tun0` vs `utun9`)
-- [ ] Package for common distros
+### UX Polish
+- [ ] Better error messages
+- [ ] Config file auto-discovery
+- [ ] Remember username
 
-### P4.2: Windows Support
-- [ ] Implement Windows route commands
-- [ ] Handle Windows hosts file path
-- [ ] Test with Windows GlobalProtect client
-
----
-
-## Priority 5: Polish
-
-Nice-to-haves for production use.
-
-### P5.1: Config Improvements
-- [ ] XDG config path support (`~/.config/pmacs-vpn/`)
-- [ ] Multiple host profiles
-- [ ] Custom route additions (subnets, not just hosts)
-
-### P5.2: Logging
-- [ ] Structured logging with tracing
-- [ ] Log file rotation
-- [ ] Syslog integration (macOS/Linux)
-
-### P5.3: Distribution
-- [ ] Homebrew formula (macOS)
+### Distribution
 - [ ] GitHub releases with binaries
-- [ ] Installation script
+- [ ] Homebrew formula (macOS)
+- [ ] Installation docs
 
 ---
 
-## Quick Reference: MVP Commands
-
-After P1 is complete:
+## Quick Test
 
 ```bash
-# Script mode (called by OpenConnect)
-sudo openconnect psomvpn.uphs.upenn.edu --protocol=gp -u USERNAME \
-  -s 'pmacs-vpn --script'
+# Build
+cargo build --release
 
-# Wrapper mode (spawns OpenConnect)
-sudo pmacs-vpn connect -u USERNAME
+# Create config (optional, uses defaults)
+./target/release/pmacs-vpn init
 
-# Check status
-pmacs-vpn status
+# Connect (requires admin/root)
+sudo ./target/release/pmacs-vpn connect -u YOUR_USERNAME
+
+# In another terminal
+ssh prometheus.pmacs.upenn.edu
 
 # Disconnect
-sudo pmacs-vpn disconnect
+# Ctrl+C in the connect terminal, or:
+sudo ./target/release/pmacs-vpn disconnect
 ```
-
----
-
-## Next Action
-
-Start with **P2.1: Connect Command (Wrapper Mode)** - spawn OpenConnect automatically so users don't need to run the complex command manually.
-
-See `docs/development notes-p1.md` for detailed implementation notes from the P1 sprint.
