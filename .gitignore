@@ -1,6 +1,7 @@
 # Config files with credentials
 .env
 config
+pmacs-vpn.toml
 
 # macOS
 .DS_Store
