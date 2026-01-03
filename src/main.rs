@@ -3,6 +3,7 @@ use pmacs_vpn::gp;
 use pmacs_vpn::vpn::routing::VpnRouter;
 use pmacs_vpn::vpn::hosts::HostsManager;
 use pmacs_vpn::AuthToken;
+use std::sync::Mutex;
 use tracing::{error, info, warn, Level};
 use tracing_subscriber::FmtSubscriber;
 
@@ -97,19 +98,55 @@ fn requires_admin(cmd: &Commands) -> bool {
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let cli = Cli::parse();
 
+    // Check if we're running as daemon child (for file logging)
+    let is_daemon_child = match &cli.command {
+        Commands::Connect { _daemon_pid, .. } => _daemon_pid.is_some(),
+        _ => false,
+    };
+
     // Set up logging
-    // Script mode uses stderr to avoid interfering with OpenConnect
     let level = if cli.verbose {
         Level::DEBUG
     } else {
         Level::INFO
     };
-    let subscriber = FmtSubscriber::builder()
-        .with_max_level(level)
-        .with_target(false)
-        .with_writer(std::io::stderr)
-        .finish();
-    tracing::subscriber::set_global_default(subscriber)?;
+
+    if is_daemon_child {
+        // Daemon mode: log to file since stdout/stderr are null
+        let home = std::env::var("USERPROFILE")
+            .or_else(|_| std::env::var("HOME"))
+            .or_else(|_| std::env::var("LOCALAPPDATA"))
+            .unwrap_or_else(|_| ".".to_string());
+        let log_path = std::path::PathBuf::from(home)
+            .join(".pmacs-vpn")
+            .join("daemon.log");
+
+        // Create parent directory if needed
+        if let Some(parent) = log_path.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+
+        // Open log file (truncate on start for clean logs)
+        let log_file = std::fs::File::create(&log_path)
+            .expect("Failed to create daemon log file");
+
+        let subscriber = FmtSubscriber::builder()
+            .with_max_level(level)
+            .with_target(false)
+            .with_ansi(false) // No color codes in log file
+            .with_writer(Mutex::new(log_file))
+            .finish();
+        tracing::subscriber::set_global_default(subscriber)?;
+        info!("Daemon child started, logging to {:?}", log_path);
+    } else {
+        // Normal mode: log to stderr
+        let subscriber = FmtSubscriber::builder()
+            .with_max_level(level)
+            .with_target(false)
+            .with_writer(std::io::stderr)
+            .finish();
+        tracing::subscriber::set_global_default(subscriber)?;
+    }
 
     // Check admin privileges for commands that need it
     if requires_admin(&cli.command) && !is_admin() {
@@ -231,6 +268,45 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
         }
         Commands::Tray => {
+            // On Windows, detach from console by respawning hidden
+            #[cfg(windows)]
+            {
+                // Check if we're already the hidden child (via env var)
+                if std::env::var("PMACS_VPN_TRAY_HIDDEN").is_err() {
+                    // Respawn self with CREATE_NO_WINDOW
+                    use std::os::windows::process::CommandExt;
+                    use std::process::{Command, Stdio};
+
+                    const CREATE_NO_WINDOW: u32 = 0x08000000;
+
+                    let exe = std::env::current_exe().expect("Failed to get exe path");
+                    let cwd = std::env::current_dir().ok();
+
+                    let mut cmd = Command::new(&exe);
+                    cmd.arg("tray");
+                    cmd.env("PMACS_VPN_TRAY_HIDDEN", "1");
+                    cmd.stdin(Stdio::null());
+                    cmd.stdout(Stdio::null());
+                    cmd.stderr(Stdio::null());
+                    cmd.creation_flags(CREATE_NO_WINDOW);
+
+                    if let Some(dir) = cwd {
+                        cmd.current_dir(dir);
+                    }
+
+                    match cmd.spawn() {
+                        Ok(_) => {
+                            // Exit parent immediately - child runs in background
+                            std::process::exit(0);
+                        }
+                        Err(e) => {
+                            eprintln!("Failed to start tray in background: {}", e);
+                            std::process::exit(1);
+                        }
+                    }
+                }
+            }
+
             info!("Starting system tray mode...");
             run_tray_mode().await;
         }
@@ -239,31 +315,68 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
+/// Cleanup VPN when tray exits (called on Ctrl+C or normal exit)
+fn cleanup_vpn_on_exit() {
+    // Kill daemon if running
+    if let Ok(Some(state)) = pmacs_vpn::VpnState::load() {
+        if state.pid.is_some() && state.is_daemon_running() {
+            let _ = state.kill_daemon();
+        }
+    }
+    // Best-effort route/hosts cleanup (sync version)
+    let _ = std::process::Command::new(std::env::current_exe().unwrap())
+        .arg("disconnect")
+        .output();
+}
+
 /// Run the VPN with system tray GUI
 async fn run_tray_mode() {
     use pmacs_vpn::tray::{TrayApp, TrayCommand, VpnStatus};
+    use pmacs_vpn::notifications;
 
-    // Create tray app and get channels
-    let (app, command_rx, status_tx) = TrayApp::new();
+    // Set up Ctrl+C handler to cleanup on exit
+    let _ = ctrlc::set_handler(move || {
+        cleanup_vpn_on_exit();
+        std::process::exit(0);
+    });
 
-    // Load config for VPN operations (for future use)
+    // Check if we have config and cached credentials for auto-connect
     let config_path = std::path::PathBuf::from("pmacs-vpn.toml");
-    let _config = if config_path.exists() {
-        pmacs_vpn::Config::load(&config_path).ok()
+    let auto_connect = if config_path.exists() {
+        if let Ok(config) = pmacs_vpn::Config::load(&config_path) {
+            if let Some(ref username) = config.vpn.username {
+                pmacs_vpn::get_password(username).is_some()
+            } else {
+                false
+            }
+        } else {
+            false
+        }
     } else {
-        None
+        false
     };
+
+    // Show setup notification if no credentials
+    if !auto_connect {
+        notifications::notify_setup_required();
+    }
+
+    // Create tray app with auto-connect setting
+    let (app, command_rx, status_tx) = TrayApp::new(auto_connect);
 
     // Clone for the command handler
     let status_tx_clone = status_tx.clone();
 
     // Spawn command handler on tokio runtime
-    let handle = tokio::spawn(async move {
+    let _handle = tokio::spawn(async move {
         while let Ok(cmd) = command_rx.recv() {
             match cmd {
                 TrayCommand::Connect => {
                     info!("Tray: Received connect command");
                     let _ = status_tx_clone.send(VpnStatus::Connecting);
+
+                    // Show DUO notification immediately
+                    notifications::notify_duo_push();
 
                     // Check if we have cached credentials
                     let config_path = std::path::PathBuf::from("pmacs-vpn.toml");
@@ -300,10 +413,11 @@ async fn run_tray_mode() {
 
                             // Poll for connection status instead of fixed wait
                             let mut connected = false;
-                            for _ in 0..20 {  // max 10 seconds
+                            for _ in 0..60 {  // max 30 seconds (DUO + TUN setup can be slow)
                                 tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
                                 if let Ok(Some(state)) = pmacs_vpn::VpnState::load() {
                                     if state.is_daemon_running() {
+                                        notifications::notify_connected();
                                         let _ = status_tx_clone.send(VpnStatus::Connected {
                                             ip: state.gateway.to_string(),
                                         });
@@ -376,12 +490,15 @@ async fn run_tray_mode() {
 
     // Run tray (this blocks until exit)
     // Note: This will run on the current thread, not tokio
-    std::thread::spawn(move || {
+    let tray_handle = std::thread::spawn(move || {
         app.run();
     });
 
-    // Wait for the command handler to finish
-    let _ = handle.await;
+    // Wait for tray to exit
+    let _ = tray_handle.join();
+
+    // Cleanup VPN when tray exits (regardless of how it exited)
+    cleanup_vpn_on_exit();
 }
 
 /// Spawn VPN as a detached background process (daemon mode)
@@ -464,7 +581,7 @@ async fn spawn_daemon(
     let exe = std::env::current_exe()?;
     let mut cmd = Command::new(&exe);
     cmd.arg("connect");
-    cmd.arg("--_daemon-pid=1");
+    cmd.arg("--daemon-pid=1");
 
     // Set working directory (needed for config file access)
     if let Ok(cwd) = std::env::current_dir() {
@@ -483,8 +600,8 @@ async fn spawn_daemon(
     {
         use std::os::windows::process::CommandExt;
         const CREATE_NEW_PROCESS_GROUP: u32 = 0x00000200;
-        const DETACHED_PROCESS: u32 = 0x00000008;
-        cmd.creation_flags(CREATE_NEW_PROCESS_GROUP | DETACHED_PROCESS);
+        const CREATE_NO_WINDOW: u32 = 0x08000000;
+        cmd.creation_flags(CREATE_NEW_PROCESS_GROUP | CREATE_NO_WINDOW);
     }
 
     let child = cmd.spawn()?;

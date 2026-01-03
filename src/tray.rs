@@ -8,9 +8,12 @@ use tao::event::{Event, StartCause};
 use tao::event_loop::{ControlFlow, EventLoopBuilder};
 #[cfg(target_os = "windows")]
 use tao::platform::windows::EventLoopBuilderExtWindows;
-use tray_icon::menu::{Menu, MenuEvent, MenuItem, PredefinedMenuItem};
+use tray_icon::menu::{CheckMenuItem, Menu, MenuEvent, MenuItem, PredefinedMenuItem};
 use tray_icon::{TrayIcon, TrayIconBuilder, TrayIconEvent};
 use tracing::{debug, error, info};
+
+use crate::notifications;
+use crate::startup;
 
 /// Commands that can be sent from the tray to the VPN controller
 #[derive(Debug, Clone)]
@@ -46,6 +49,7 @@ enum UserEvent {
 pub struct TrayApp {
     command_tx: mpsc::Sender<TrayCommand>,
     status_rx: mpsc::Receiver<VpnStatus>,
+    auto_connect: bool,
 }
 
 impl TrayApp {
@@ -54,13 +58,16 @@ impl TrayApp {
     /// Returns the app and channels for communication:
     /// - command_rx: Receive commands from tray (connect, disconnect, etc.)
     /// - status_tx: Send VPN status updates to tray
-    pub fn new() -> (Self, mpsc::Receiver<TrayCommand>, mpsc::Sender<VpnStatus>) {
+    ///
+    /// If `auto_connect` is true, the tray will send a Connect command on startup.
+    pub fn new(auto_connect: bool) -> (Self, mpsc::Receiver<TrayCommand>, mpsc::Sender<VpnStatus>) {
         let (command_tx, command_rx) = mpsc::channel();
         let (status_tx, status_rx) = mpsc::channel();
 
         let app = Self {
             command_tx,
             status_rx,
+            auto_connect,
         };
 
         (app, command_rx, status_tx)
@@ -98,11 +105,13 @@ impl TrayApp {
         let status_item = MenuItem::new("Status: Disconnected", false, None);
         let connect_item = MenuItem::new("Connect", true, None);
         let disconnect_item = MenuItem::new("Disconnect", false, None);
+        let startup_item = CheckMenuItem::new("Start with Windows", true, startup::is_startup_enabled(), None);
         let exit_item = MenuItem::new("Exit", true, None);
 
         // Store item IDs for event matching
         let connect_id = connect_item.id().clone();
         let disconnect_id = disconnect_item.id().clone();
+        let startup_id = startup_item.id().clone();
         let exit_id = exit_item.id().clone();
 
         // Build menu
@@ -113,6 +122,8 @@ impl TrayApp {
             &connect_item,
             &disconnect_item,
             &PredefinedMenuItem::separator(),
+            &startup_item,
+            &PredefinedMenuItem::separator(),
             &exit_item,
         ])
         .expect("Failed to build menu");
@@ -122,6 +133,8 @@ impl TrayApp {
         let mut current_status = VpnStatus::Disconnected;
         let command_tx = self.command_tx;
         let status_rx = self.status_rx;
+        let auto_connect = self.auto_connect;
+        let mut auto_connect_sent = false;
 
         // Spawn a thread to forward status updates
         let proxy_clone = proxy.clone();
@@ -149,6 +162,13 @@ impl TrayApp {
                             .expect("Failed to create tray icon"),
                     );
                     info!("Tray icon created successfully");
+
+                    // Auto-connect if credentials are cached
+                    if auto_connect && !auto_connect_sent {
+                        info!("Auto-connecting on startup");
+                        let _ = command_tx.send(TrayCommand::Connect);
+                        auto_connect_sent = true;
+                    }
                 }
 
                 Event::UserEvent(UserEvent::Menu(event)) => {
@@ -158,6 +178,17 @@ impl TrayApp {
                     } else if event.id == disconnect_id {
                         info!("Tray: Disconnect clicked");
                         let _ = command_tx.send(TrayCommand::Disconnect);
+                    } else if event.id == startup_id {
+                        info!("Tray: Startup toggle clicked");
+                        match startup::toggle_startup() {
+                            Ok(enabled) => {
+                                startup_item.set_checked(enabled);
+                                info!("Startup {}", if enabled { "enabled" } else { "disabled" });
+                            }
+                            Err(e) => {
+                                error!("Failed to toggle startup: {}", e);
+                            }
+                        }
                     } else if event.id == exit_id {
                         info!("Tray: Exit clicked");
                         let _ = command_tx.send(TrayCommand::Exit);
@@ -168,6 +199,13 @@ impl TrayApp {
                 Event::UserEvent(UserEvent::VpnStatus(status)) => {
                     if status != current_status {
                         debug!("VPN status changed: {:?}", status);
+
+                        // Notifications are sent from main.rs command handlers
+                        // Only handle error notifications here (not sent elsewhere)
+                        if let VpnStatus::Error(msg) = &status {
+                            notifications::notify_error(msg);
+                        }
+
                         current_status = status.clone();
                         if let Some(ref tray) = tray_icon {
                             update_tray_for_status(tray, &status);

@@ -209,17 +209,29 @@ impl VpnState {
     /// Kill the daemon process
     #[cfg(windows)]
     pub fn kill_daemon(&self) -> Result<(), StateError> {
-        use std::process::Command;
-
         if let Some(pid) = self.pid {
-            let status = Command::new("taskkill")
-                .args(["/PID", &pid.to_string(), "/F"])
-                .status()
-                .map_err(StateError::ReadError)?;
+            // Use Windows API directly for better reliability
+            use windows::Win32::Foundation::CloseHandle;
+            use windows::Win32::System::Threading::{
+                OpenProcess, TerminateProcess, PROCESS_TERMINATE,
+            };
 
-            if !status.success() {
-                // Process might already be dead, which is fine
-                tracing::warn!("taskkill returned non-zero for PID {}", pid);
+            unsafe {
+                match OpenProcess(PROCESS_TERMINATE, false, pid) {
+                    Ok(handle) => {
+                        let result = TerminateProcess(handle, 1);
+                        let _ = CloseHandle(handle);
+                        if result.is_err() {
+                            tracing::warn!("TerminateProcess failed for PID {}", pid);
+                        } else {
+                            tracing::info!("Terminated daemon process {}", pid);
+                        }
+                    }
+                    Err(e) => {
+                        // Process might already be dead
+                        tracing::debug!("Could not open process {}: {}", pid, e);
+                    }
+                }
             }
         }
         Ok(())
