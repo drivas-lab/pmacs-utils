@@ -9,48 +9,25 @@ Native GlobalProtect client working on Windows:
 - ✅ DNS resolution via VPN
 - ✅ Hosts file management
 - ✅ State persistence and cleanup
+- ✅ Username in config
+- ✅ Credential caching (Windows Credential Manager)
+- ✅ Desktop shortcut workflow
 
-## Quick Wins
+## Completed
 
-### 1. Save Username in Config
-**Status:** TODO
-**Effort:** Small
+### 1. Save Username in Config ✅
+Config supports `username` field - no need to type each time.
 
-Add `username` field to config so users don't type it each time:
-```toml
-[vpn]
-gateway = "psomvpn.uphs.upenn.edu"
-username = "yjk"
-```
+### 2. Credential Caching ✅
+- `--save-password` stores password in Windows Credential Manager
+- `--forget-password` clears stored password
+- `forget-password` subcommand for management
 
-### 2. SSH Config Guidance
-**Status:** TODO
-**Effort:** Documentation only
+### 3. Desktop Shortcut ✅
+- `scripts/connect.ps1` - auto-elevating PowerShell script
+- `docs/windows-shortcut.md` - setup guide
 
-Document recommended SSH config for use with native VPN:
-```
-Host prometheus
-    HostName prometheus.pmacs.upenn.edu
-    User yjk
-    IdentityFile ~/.ssh/id_ed25519
-```
-
-No ProxyJump needed when VPN runs natively on Windows.
-
-### 3. Better Connect Output
-**Status:** TODO
-**Effort:** Small
-
-Show cleaner status during connection:
-```
-Authenticating... ✓
-Waiting for DUO push... ✓
-Establishing tunnel... ✓
-Adding routes... ✓
-Connected to PMACS VPN (10.156.56.38)
-```
-
-## Medium Priority
+## Next Priority
 
 ### 4. Background/Daemon Mode
 **Status:** TODO
@@ -82,16 +59,18 @@ Session lifetime (16hr max) handling:
 - Warn before session expires
 - Prompt for re-auth when needed
 
-### 6. Credential Caching
+### 6. Better Connect Output
 **Status:** TODO
-**Effort:** Medium
+**Effort:** Small
 
-Store password securely:
-- Windows: Credential Manager
-- macOS: Keychain
-- Linux: libsecret/kwallet
-
-Ask once, remember for session or persist.
+Show cleaner status during connection:
+```
+Authenticating... ✓
+Waiting for DUO push... ✓
+Establishing tunnel... ✓
+Adding routes... ✓
+Connected to PMACS VPN (10.156.56.38)
+```
 
 ## Cross-Platform
 
