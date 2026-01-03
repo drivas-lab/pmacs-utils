@@ -1,10 +1,8 @@
 //! Route table manipulation for split-tunnel VPN
 
 use crate::platform::{get_routing_manager, PlatformError};
-use std::net::IpAddr;
+use std::net::{IpAddr, ToSocketAddrs};
 use thiserror::Error;
-use trust_dns_resolver::config::{ResolverConfig, ResolverOpts};
-use trust_dns_resolver::Resolver;
 
 #[derive(Error, Debug)]
 pub enum RoutingError {
@@ -21,34 +19,27 @@ pub enum RoutingError {
 
 pub struct VpnRouter {
     gateway: String,
-    resolver: Resolver,
 }
 
 impl VpnRouter {
     pub fn new(gateway: String) -> Result<Self, RoutingError> {
-        let resolver =
-            Resolver::new(ResolverConfig::default(), ResolverOpts::default()).map_err(|e| {
-                RoutingError::DnsError {
-                    host: "resolver".to_string(),
-                    source: Box::new(e),
-                }
-            })?;
-
-        Ok(Self { gateway, resolver })
+        Ok(Self { gateway })
     }
 
     pub fn resolve_host(&self, hostname: &str) -> Result<IpAddr, RoutingError> {
-        let response = self
-            .resolver
-            .lookup_ip(hostname)
+        // Use std::net::ToSocketAddrs which works without runtime conflicts
+        let addr_str = format!("{}:0", hostname);
+        let addrs = addr_str
+            .to_socket_addrs()
             .map_err(|e| RoutingError::DnsError {
                 host: hostname.to_string(),
                 source: Box::new(e),
             })?;
 
-        response
-            .iter()
+        addrs
+            .into_iter()
             .next()
+            .map(|a| a.ip())
             .ok_or_else(|| RoutingError::NoAddressFound(hostname.to_string()))
     }
 
