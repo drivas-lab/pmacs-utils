@@ -68,17 +68,13 @@ pmacs-vpn init
 
 **Working on Windows** (2026-01-03)
 
-- [x] Rust project scaffold with CLI
-- [x] Platform routing managers (mac/linux/windows)
-- [x] Hosts file management
-- [x] State persistence
-- [x] Native GlobalProtect auth module
-- [x] SSL tunnel implementation (async TUN I/O)
-- [x] TUN device integration (wintun)
-- [x] CLI wiring (connect/disconnect/status)
-- [x] 62 unit tests passing
-- [x] Clippy clean (no warnings)
-- [x] **Windows integration tested - SSH to prometheus works!**
+- [x] Full auth flow (password + DUO push)
+- [x] SSL tunnel with async TUN I/O
+- [x] Split-tunnel routing
+- [x] Credential caching (Windows Credential Manager)
+- [x] Desktop shortcut workflow
+- [x] 61 unit tests, clippy clean
+- [x] **SSH to prometheus works!**
 - [ ] macOS testing
 - [ ] Linux testing
 
@@ -90,12 +86,13 @@ See [TODO.md](TODO.md) for improvement roadmap.
 src/
 ├── main.rs          # CLI
 ├── config.rs        # TOML config
+├── credentials.rs   # OS keychain (Windows Credential Manager)
 ├── state.rs         # Connection state persistence
-├── gp/              # GlobalProtect protocol (NEW)
+├── gp/              # GlobalProtect protocol
 │   ├── auth.rs      # prelogin → login → getconfig
-│   ├── tunnel.rs    # SSL tunnel
-│   ├── tun.rs       # TUN device wrapper
-│   └── packet.rs    # Packet framing
+│   ├── tunnel.rs    # SSL tunnel + async event loop
+│   ├── tun.rs       # Async TUN device wrapper
+│   └── packet.rs    # GP packet framing (16-byte header)
 ├── platform/        # OS-specific routing
 │   ├── mac.rs
 │   ├── linux.rs
@@ -132,12 +129,21 @@ cargo build --release
 
 The binary embeds `wintun.dll` (~420KB) from [wintun.net](https://www.wintun.net/). On first TUN device creation, it auto-extracts to the executable's directory. No manual installation needed.
 
-## Testing (requires admin/root)
+## Usage (requires admin/root)
 
 ```bash
+# First time - save password to OS keychain
 cargo build --release
-sudo ./target/release/pmacs-vpn connect -u YOUR_USERNAME
-# Enter password, approve DUO push on phone
-# In another terminal: ssh prometheus.pmacs.upenn.edu
+./target/release/pmacs-vpn connect --save-password
+# Enter password, approve DUO push, password saved
+
+# Future connects - just approve DUO
+./target/release/pmacs-vpn connect
+
+# In another terminal
+ssh prometheus.pmacs.upenn.edu
+
 # Ctrl+C to disconnect
 ```
+
+**Desktop shortcut:** See `docs/windows-shortcut.md` for double-click setup.
