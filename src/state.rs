@@ -97,9 +97,18 @@ impl VpnState {
     }
 
     /// Get the state file path
+    /// Works on both Unix (HOME) and Windows (USERPROFILE/LOCALAPPDATA)
     pub fn state_file_path() -> Result<PathBuf, StateError> {
-        let home =
-            std::env::var("HOME").map_err(|_| StateError::DirectoryError("HOME not set".into()))?;
+        // Try in order: HOME (Unix), USERPROFILE (Windows), LOCALAPPDATA (Windows)
+        let home = std::env::var("HOME")
+            .or_else(|_| std::env::var("USERPROFILE"))
+            .or_else(|_| std::env::var("LOCALAPPDATA"))
+            .map_err(|_| {
+                StateError::DirectoryError(
+                    "HOME/USERPROFILE/LOCALAPPDATA not set".into(),
+                )
+            })?;
+
         let state_dir = PathBuf::from(home).join(".pmacs-vpn");
 
         // Create directory if it doesn't exist
