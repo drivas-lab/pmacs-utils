@@ -556,10 +556,12 @@ pub async fn getconfig(
         .as_ref()
         .and_then(|s| s.parse().ok());
 
+    // Server may return MTU 0 meaning "use default" - use 1400 as safe default
     let mtu = policy
         .mtu
         .as_ref()
-        .and_then(|s| s.parse().ok())
+        .and_then(|s| s.parse::<u16>().ok())
+        .filter(|&m| m > 0)
         .unwrap_or(1400);
 
     let dns_servers = policy
