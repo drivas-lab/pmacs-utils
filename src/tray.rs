@@ -219,27 +219,27 @@ impl TrayApp {
                         // Update menu items based on status
                         match &status {
                             VpnStatus::Disconnected => {
-                                let _ = status_item.set_text("Status: Disconnected");
+                                status_item.set_text("Status: Disconnected");
                                 connect_item.set_enabled(true);
                                 disconnect_item.set_enabled(false);
                             }
                             VpnStatus::Connecting => {
-                                let _ = status_item.set_text("Status: Connecting...");
+                                status_item.set_text("Status: Connecting...");
                                 connect_item.set_enabled(false);
                                 disconnect_item.set_enabled(false);
                             }
                             VpnStatus::Connected { ip } => {
-                                let _ = status_item.set_text(&format!("Status: Connected ({})", ip));
+                                status_item.set_text(format!("Status: Connected ({})", ip));
                                 connect_item.set_enabled(false);
                                 disconnect_item.set_enabled(true);
                             }
                             VpnStatus::Disconnecting => {
-                                let _ = status_item.set_text("Status: Disconnecting...");
+                                status_item.set_text("Status: Disconnecting...");
                                 connect_item.set_enabled(false);
                                 disconnect_item.set_enabled(false);
                             }
                             VpnStatus::Error(_) => {
-                                let _ = status_item.set_text("Status: Error");
+                                status_item.set_text("Status: Error");
                                 connect_item.set_enabled(true);
                                 disconnect_item.set_enabled(false);
                             }

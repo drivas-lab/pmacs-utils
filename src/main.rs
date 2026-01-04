@@ -488,6 +488,30 @@ async fn run_tray_mode() {
         }
     }
 
+    // Spawn health monitor to detect daemon death (e.g., after sleep/wake)
+    let status_tx_health = status_tx.clone();
+    let _health_handle = tokio::spawn(async move {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        static WAS_CONNECTED: AtomicBool = AtomicBool::new(false);
+
+        loop {
+            tokio::time::sleep(tokio::time::Duration::from_secs(5)).await;
+
+            if let Ok(Some(state)) = pmacs_vpn::VpnState::load() {
+                if state.pid.is_some() {
+                    if state.is_daemon_running() {
+                        WAS_CONNECTED.store(true, Ordering::Relaxed);
+                    } else if WAS_CONNECTED.swap(false, Ordering::Relaxed) {
+                        // Daemon died unexpectedly (was connected, now dead)
+                        info!("Health monitor: Daemon died unexpectedly");
+                        notifications::notify_error("VPN disconnected unexpectedly");
+                        let _ = status_tx_health.send(VpnStatus::Disconnected);
+                    }
+                }
+            }
+        }
+    });
+
     // Run tray (this blocks until exit)
     // Note: This will run on the current thread, not tokio
     let tray_handle = std::thread::spawn(move || {
