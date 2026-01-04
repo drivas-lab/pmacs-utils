@@ -86,7 +86,7 @@ fn is_admin() -> bool {
 /// Check if running with root privileges (Unix)
 #[cfg(not(windows))]
 fn is_admin() -> bool {
-    unsafe { libc::geteuid() == 0 }
+    unsafe { nix::libc::geteuid() == 0 }
 }
 
 /// Commands that require admin privileges
