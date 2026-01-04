@@ -1,14 +1,17 @@
-//! Windows toast notifications for VPN status updates
+//! Cross-platform notifications for VPN status updates
 
 #[cfg(windows)]
 use winrt_notification::{Duration, Sound, Toast};
+
+#[cfg(not(windows))]
+use notify_rust::Notification;
 
 /// App ID for toast notifications
 /// Using PowerShell's AUMID for compatibility (custom app IDs require registration)
 #[cfg(windows)]
 const APP_ID: &str = "{1AC14E77-02E7-4E5D-B744-2EB1AE5198B7}\\WindowsPowerShell\\v1.0\\powershell.exe";
 
-/// Show a toast notification (Windows only, no-op on other platforms)
+/// Show a toast notification
 #[allow(unused_variables)]
 pub fn show_notification(title: &str, message: &str) {
     #[cfg(windows)]
@@ -22,9 +25,21 @@ pub fn show_notification(title: &str, message: &str) {
             tracing::warn!("Failed to show notification: {}", e);
         }
     }
+
+    #[cfg(not(windows))]
+    {
+        if let Err(e) = Notification::new()
+            .summary(title)
+            .body(message)
+            .timeout(notify_rust::Timeout::Milliseconds(5000))
+            .show()
+        {
+            tracing::warn!("Failed to show notification: {}", e);
+        }
+    }
 }
 
-/// Show a notification with sound
+/// Show notification with sound (platform-specific)
 #[allow(unused_variables)]
 pub fn show_notification_with_sound(title: &str, message: &str) {
     #[cfg(windows)]
@@ -34,6 +49,20 @@ pub fn show_notification_with_sound(title: &str, message: &str) {
             .text1(message)
             .sound(Some(Sound::Default))
             .duration(Duration::Short)
+            .show()
+        {
+            tracing::warn!("Failed to show notification: {}", e);
+        }
+    }
+
+    #[cfg(not(windows))]
+    {
+        // notify-rust doesn't have cross-platform sound, just show normally
+        // macOS will use system notification sound if enabled in preferences
+        if let Err(e) = Notification::new()
+            .summary(title)
+            .body(message)
+            .timeout(notify_rust::Timeout::Milliseconds(5000))
             .show()
         {
             tracing::warn!("Failed to show notification: {}", e);
@@ -62,11 +91,7 @@ pub fn notify_setup_required() {
 }
 
 /// Notify connection error
-#[allow(unused_variables)]
 pub fn notify_error(message: &str) {
-    #[cfg(windows)]
-    {
-        let msg = format!("Connection failed: {}", message);
-        show_notification("PMACS VPN", &msg);
-    }
+    let msg = format!("Connection failed: {}", message);
+    show_notification("PMACS VPN", &msg);
 }

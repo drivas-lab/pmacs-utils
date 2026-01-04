@@ -1,8 +1,11 @@
-//! Windows startup registration
+//! Platform-specific startup registration
 //!
-//! Manages the "Start with Windows" feature by adding/removing
-//! a registry key in HKCU\Software\Microsoft\Windows\CurrentVersion\Run.
-//! This makes the app visible in Task Manager's Startup tab.
+//! Manages the "Start at login" feature:
+//! - Windows: Registry key in HKCU\Software\Microsoft\Windows\CurrentVersion\Run
+//! - macOS: LaunchAgent plist in ~/Library/LaunchAgents/
+//! - Linux: Not yet implemented
+
+use thiserror::Error;
 
 #[cfg(windows)]
 use windows::Win32::Foundation::ERROR_SUCCESS;
@@ -17,14 +20,27 @@ use windows::core::PCWSTR;
 
 const APP_NAME: &str = "PMACS VPN";
 
+#[derive(Error, Debug)]
+pub enum StartupError {
+    #[error("IO error: {0}")]
+    Io(#[from] std::io::Error),
+
+    #[error("{0}")]
+    Other(String),
+}
+
 #[cfg(windows)]
 fn to_wide(s: &str) -> Vec<u16> {
     s.encode_utf16().chain(std::iter::once(0)).collect()
 }
 
-/// Check if startup is enabled
+// =============================================================================
+// Windows Implementation
+// =============================================================================
+
+/// Check if startup is enabled (Windows)
 #[cfg(windows)]
-pub fn is_startup_enabled() -> bool {
+pub fn is_start_at_login_enabled() -> bool {
     unsafe {
         let subkey = to_wide(r"Software\Microsoft\Windows\CurrentVersion\Run");
         let mut hkey: HKEY = HKEY::default();
@@ -56,16 +72,11 @@ pub fn is_startup_enabled() -> bool {
     }
 }
 
-#[cfg(not(windows))]
-pub fn is_startup_enabled() -> bool {
-    false
-}
-
-/// Enable startup (add to registry)
+/// Enable start at login (Windows)
 #[cfg(windows)]
-pub fn enable_startup() -> Result<(), String> {
+pub fn enable_start_at_login() -> Result<(), StartupError> {
     let exe_path = std::env::current_exe()
-        .map_err(|e| format!("Failed to get exe path: {}", e))?;
+        .map_err(|e| StartupError::Other(format!("Failed to get exe path: {}", e)))?;
 
     // Command: "path\to\pmacs-vpn.exe" tray
     let command = format!("\"{}\" tray", exe_path.display());
@@ -83,7 +94,7 @@ pub fn enable_startup() -> Result<(), String> {
         );
 
         if result != ERROR_SUCCESS {
-            return Err(format!("Failed to open registry key: {:?}", result));
+            return Err(StartupError::Other(format!("Failed to open registry key: {:?}", result)));
         }
 
         let value_name = to_wide(APP_NAME);
@@ -103,20 +114,17 @@ pub fn enable_startup() -> Result<(), String> {
 
         let _ = RegCloseKey(hkey);
         if result != ERROR_SUCCESS {
-            return Err(format!("Failed to set registry value: {:?}", result));
+            return Err(StartupError::Other(format!("Failed to set registry value: {:?}", result)));
         }
+
+        tracing::info!("Enabled start at login (Windows registry)");
         Ok(())
     }
 }
 
-#[cfg(not(windows))]
-pub fn enable_startup() -> Result<(), String> {
-    Err("Startup registration not supported on this platform".into())
-}
-
-/// Disable startup (remove from registry)
+/// Disable start at login (Windows)
 #[cfg(windows)]
-pub fn disable_startup() -> Result<(), String> {
+pub fn disable_start_at_login() -> Result<(), StartupError> {
     unsafe {
         let subkey = to_wide(r"Software\Microsoft\Windows\CurrentVersion\Run");
         let mut hkey: HKEY = HKEY::default();
@@ -130,7 +138,7 @@ pub fn disable_startup() -> Result<(), String> {
         );
 
         if result != ERROR_SUCCESS {
-            return Err(format!("Failed to open registry key: {:?}", result));
+            return Err(StartupError::Other(format!("Failed to open registry key: {:?}", result)));
         }
 
         let value_name = to_wide(APP_NAME);
@@ -142,15 +150,120 @@ pub fn disable_startup() -> Result<(), String> {
         let _ = RegCloseKey(hkey);
         // Ignore "not found" error (2 = ERROR_FILE_NOT_FOUND)
         if result != ERROR_SUCCESS && result.0 != 2 {
-            return Err(format!("Failed to delete registry value: {:?}", result));
+            return Err(StartupError::Other(format!("Failed to delete registry value: {:?}", result)));
         }
+
+        tracing::info!("Disabled start at login (Windows registry)");
         Ok(())
     }
 }
 
-#[cfg(not(windows))]
-pub fn disable_startup() -> Result<(), String> {
+// =============================================================================
+// macOS Implementation
+// =============================================================================
+
+/// LaunchAgent plist path
+#[cfg(target_os = "macos")]
+fn launchagent_path() -> Option<std::path::PathBuf> {
+    dirs::home_dir().map(|h| h.join("Library/LaunchAgents/com.pmacs.vpn.plist"))
+}
+
+/// Enable start at login (macOS)
+#[cfg(target_os = "macos")]
+pub fn enable_start_at_login() -> Result<(), StartupError> {
+    use std::fs;
+
+    let plist_path = launchagent_path()
+        .ok_or_else(|| StartupError::Other("Could not find home directory".into()))?;
+
+    // Get path to current executable
+    let exe_path = std::env::current_exe()
+        .map_err(|e| StartupError::Other(format!("Could not get executable path: {}", e)))?;
+
+    let plist_content = format!(r#"<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.pmacs.vpn</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>{}</string>
+        <string>tray</string>
+    </array>
+    <key>RunAtLoad</key>
+    <true/>
+    <key>KeepAlive</key>
+    <false/>
+</dict>
+</plist>
+"#, exe_path.display());
+
+    // Create LaunchAgents directory if needed
+    if let Some(parent) = plist_path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+
+    fs::write(&plist_path, plist_content)?;
+    tracing::info!("Created LaunchAgent: {}", plist_path.display());
     Ok(())
+}
+
+/// Disable start at login (macOS)
+#[cfg(target_os = "macos")]
+pub fn disable_start_at_login() -> Result<(), StartupError> {
+    let plist_path = launchagent_path()
+        .ok_or_else(|| StartupError::Other("Could not find home directory".into()))?;
+
+    if plist_path.exists() {
+        std::fs::remove_file(&plist_path)?;
+        tracing::info!("Removed LaunchAgent: {}", plist_path.display());
+    }
+    Ok(())
+}
+
+/// Check if start at login is enabled (macOS)
+#[cfg(target_os = "macos")]
+pub fn is_start_at_login_enabled() -> bool {
+    launchagent_path().map(|p| p.exists()).unwrap_or(false)
+}
+
+// =============================================================================
+// Linux Implementation (stub)
+// =============================================================================
+
+#[cfg(target_os = "linux")]
+pub fn enable_start_at_login() -> Result<(), StartupError> {
+    Err(StartupError::Other("Start at login not implemented for Linux".into()))
+}
+
+#[cfg(target_os = "linux")]
+pub fn disable_start_at_login() -> Result<(), StartupError> {
+    Err(StartupError::Other("Start at login not implemented for Linux".into()))
+}
+
+#[cfg(target_os = "linux")]
+pub fn is_start_at_login_enabled() -> bool {
+    false
+}
+
+// =============================================================================
+// Legacy function names (for backward compatibility)
+// =============================================================================
+
+/// Check if startup is enabled (legacy name)
+pub fn is_startup_enabled() -> bool {
+    is_start_at_login_enabled()
+}
+
+/// Enable startup (legacy name)
+pub fn enable_startup() -> Result<(), String> {
+    enable_start_at_login().map_err(|e| e.to_string())
+}
+
+/// Disable startup (legacy name)
+pub fn disable_startup() -> Result<(), String> {
+    disable_start_at_login().map_err(|e| e.to_string())
 }
 
 /// Toggle startup state

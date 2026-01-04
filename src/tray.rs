@@ -8,12 +8,19 @@ use tao::event::{Event, StartCause};
 use tao::event_loop::{ControlFlow, EventLoopBuilder};
 #[cfg(target_os = "windows")]
 use tao::platform::windows::EventLoopBuilderExtWindows;
-use tray_icon::menu::{CheckMenuItem, Menu, MenuEvent, MenuItem, PredefinedMenuItem};
+use tray_icon::menu::{CheckMenuItem, Menu, MenuEvent, MenuItem, PredefinedMenuItem, Submenu};
 use tray_icon::{TrayIcon, TrayIconBuilder, TrayIconEvent};
 use tracing::{debug, error, info};
 
+use crate::config::DuoMethod;
 use crate::notifications;
 use crate::startup;
+
+// Platform-specific startup menu label
+#[cfg(target_os = "windows")]
+const STARTUP_LABEL: &str = "Start with Windows";
+#[cfg(not(target_os = "windows"))]
+const STARTUP_LABEL: &str = "Start at Login";
 
 /// Commands that can be sent from the tray to the VPN controller
 #[derive(Debug, Clone)]
@@ -26,6 +33,10 @@ pub enum TrayCommand {
     ShowStatus,
     /// Exit the application
     Exit,
+    /// Toggle save password preference
+    ToggleSavePassword,
+    /// Set DUO authentication method
+    SetDuoMethod(DuoMethod),
 }
 
 /// VPN state updates sent from the VPN controller to the tray
@@ -50,6 +61,8 @@ pub struct TrayApp {
     command_tx: mpsc::Sender<TrayCommand>,
     status_rx: mpsc::Receiver<VpnStatus>,
     auto_connect: bool,
+    save_password: bool,
+    duo_method: DuoMethod,
 }
 
 impl TrayApp {
@@ -60,7 +73,11 @@ impl TrayApp {
     /// - status_tx: Send VPN status updates to tray
     ///
     /// If `auto_connect` is true, the tray will send a Connect command on startup.
-    pub fn new(auto_connect: bool) -> (Self, mpsc::Receiver<TrayCommand>, mpsc::Sender<VpnStatus>) {
+    pub fn new(
+        auto_connect: bool,
+        save_password: bool,
+        duo_method: DuoMethod,
+    ) -> (Self, mpsc::Receiver<TrayCommand>, mpsc::Sender<VpnStatus>) {
         let (command_tx, command_rx) = mpsc::channel();
         let (status_tx, status_rx) = mpsc::channel();
 
@@ -68,6 +85,8 @@ impl TrayApp {
             command_tx,
             status_rx,
             auto_connect,
+            save_password,
+            duo_method,
         };
 
         (app, command_rx, status_tx)
@@ -105,12 +124,35 @@ impl TrayApp {
         let status_item = MenuItem::new("Status: Disconnected", false, None);
         let connect_item = MenuItem::new("Connect", true, None);
         let disconnect_item = MenuItem::new("Disconnect", false, None);
-        let startup_item = CheckMenuItem::new("Start with Windows", true, startup::is_startup_enabled(), None);
+
+        // Preferences menu items
+        let save_password_item = CheckMenuItem::new("Save Password", true, self.save_password, None);
+
+        // DUO method submenu
+        let duo_submenu = Submenu::new("DUO Method", true);
+        let duo_push_item = CheckMenuItem::new("Push", true, self.duo_method == DuoMethod::Push, None);
+        let duo_sms_item = CheckMenuItem::new("SMS", true, self.duo_method == DuoMethod::Sms, None);
+        let duo_call_item = CheckMenuItem::new("Call", true, self.duo_method == DuoMethod::Call, None);
+        let duo_passcode_item = CheckMenuItem::new("Passcode", true, self.duo_method == DuoMethod::Passcode, None);
+
+        duo_submenu.append_items(&[
+            &duo_push_item,
+            &duo_sms_item,
+            &duo_call_item,
+            &duo_passcode_item,
+        ]).expect("Failed to build DUO submenu");
+
+        let startup_item = CheckMenuItem::new(STARTUP_LABEL, true, startup::is_startup_enabled(), None);
         let exit_item = MenuItem::new("Exit", true, None);
 
         // Store item IDs for event matching
         let connect_id = connect_item.id().clone();
         let disconnect_id = disconnect_item.id().clone();
+        let save_password_id = save_password_item.id().clone();
+        let duo_push_id = duo_push_item.id().clone();
+        let duo_sms_id = duo_sms_item.id().clone();
+        let duo_call_id = duo_call_item.id().clone();
+        let duo_passcode_id = duo_passcode_item.id().clone();
         let startup_id = startup_item.id().clone();
         let exit_id = exit_item.id().clone();
 
@@ -122,6 +164,8 @@ impl TrayApp {
             &connect_item,
             &disconnect_item,
             &PredefinedMenuItem::separator(),
+            &save_password_item,
+            &duo_submenu,
             &startup_item,
             &PredefinedMenuItem::separator(),
             &exit_item,
@@ -178,6 +222,39 @@ impl TrayApp {
                     } else if event.id == disconnect_id {
                         info!("Tray: Disconnect clicked");
                         let _ = command_tx.send(TrayCommand::Disconnect);
+                    } else if event.id == save_password_id {
+                        info!("Tray: Save Password toggle clicked");
+                        let new_state = !save_password_item.is_checked();
+                        save_password_item.set_checked(new_state);
+                        let _ = command_tx.send(TrayCommand::ToggleSavePassword);
+                    } else if event.id == duo_push_id {
+                        info!("Tray: DUO Push selected");
+                        duo_push_item.set_checked(true);
+                        duo_sms_item.set_checked(false);
+                        duo_call_item.set_checked(false);
+                        duo_passcode_item.set_checked(false);
+                        let _ = command_tx.send(TrayCommand::SetDuoMethod(DuoMethod::Push));
+                    } else if event.id == duo_sms_id {
+                        info!("Tray: DUO SMS selected");
+                        duo_push_item.set_checked(false);
+                        duo_sms_item.set_checked(true);
+                        duo_call_item.set_checked(false);
+                        duo_passcode_item.set_checked(false);
+                        let _ = command_tx.send(TrayCommand::SetDuoMethod(DuoMethod::Sms));
+                    } else if event.id == duo_call_id {
+                        info!("Tray: DUO Call selected");
+                        duo_push_item.set_checked(false);
+                        duo_sms_item.set_checked(false);
+                        duo_call_item.set_checked(true);
+                        duo_passcode_item.set_checked(false);
+                        let _ = command_tx.send(TrayCommand::SetDuoMethod(DuoMethod::Call));
+                    } else if event.id == duo_passcode_id {
+                        info!("Tray: DUO Passcode selected");
+                        duo_push_item.set_checked(false);
+                        duo_sms_item.set_checked(false);
+                        duo_call_item.set_checked(false);
+                        duo_passcode_item.set_checked(true);
+                        let _ = command_tx.send(TrayCommand::SetDuoMethod(DuoMethod::Passcode));
                     } else if event.id == startup_id {
                         info!("Tray: Startup toggle clicked");
                         match startup::toggle_startup() {
