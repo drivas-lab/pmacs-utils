@@ -19,3 +19,4 @@ pmacs-vpn.toml
 
 /target
 nul
+.pmacs-vpn/
