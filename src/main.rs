@@ -342,18 +342,23 @@ async fn run_tray_mode() {
 
     // Check if we have config and cached credentials for auto-connect
     let config_path = std::path::PathBuf::from("pmacs-vpn.toml");
-    let auto_connect = if config_path.exists() {
+    let (auto_connect, save_password, duo_method) = if config_path.exists() {
         if let Ok(config) = pmacs_vpn::Config::load(&config_path) {
-            if let Some(ref username) = config.vpn.username {
+            let has_cached_password = if let Some(ref username) = config.vpn.username {
                 pmacs_vpn::get_password(username).is_some()
             } else {
                 false
-            }
+            };
+            (
+                has_cached_password,
+                config.preferences.save_password,
+                config.preferences.duo_method.clone(),
+            )
         } else {
-            false
+            (false, true, pmacs_vpn::DuoMethod::default())
         }
     } else {
-        false
+        (false, true, pmacs_vpn::DuoMethod::default())
     };
 
     // Show setup notification if no credentials
@@ -362,7 +367,7 @@ async fn run_tray_mode() {
     }
 
     // Create tray app with auto-connect setting
-    let (app, command_rx, status_tx) = TrayApp::new(auto_connect);
+    let (app, command_rx, status_tx) = TrayApp::new(auto_connect, save_password, duo_method);
 
     // Clone for the command handler
     let status_tx_clone = status_tx.clone();
@@ -464,6 +469,30 @@ async fn run_tray_mode() {
                     info!("Tray: Show status requested");
                     // Future: Show a status window
                 }
+                TrayCommand::ToggleSavePassword => {
+                    info!("Tray: Toggle save password preference");
+                    let config_path = std::path::PathBuf::from("pmacs-vpn.toml");
+                    if let Ok(mut config) = pmacs_vpn::Config::load(&config_path) {
+                        config.preferences.save_password = !config.preferences.save_password;
+                        if let Err(e) = config.save(&config_path) {
+                            error!("Failed to save config: {}", e);
+                        } else {
+                            info!("Save password preference updated to: {}", config.preferences.save_password);
+                        }
+                    }
+                }
+                TrayCommand::SetDuoMethod(method) => {
+                    info!("Tray: Set DUO method to {:?}", method);
+                    let config_path = std::path::PathBuf::from("pmacs-vpn.toml");
+                    if let Ok(mut config) = pmacs_vpn::Config::load(&config_path) {
+                        config.preferences.duo_method = method;
+                        if let Err(e) = config.save(&config_path) {
+                            error!("Failed to save config: {}", e);
+                        } else {
+                            info!("DUO method preference updated");
+                        }
+                    }
+                }
                 TrayCommand::Exit => {
                     info!("Tray: Exit requested");
                     // Cleanup if connected
@@ -560,16 +589,20 @@ async fn spawn_daemon(
     }
 
     // 4. Get password (from keychain or prompt)
-    let password = if !forget_password {
+    let (password, was_cached) = if !forget_password {
         match pmacs_vpn::get_password(&username) {
             Some(stored) => {
-                println!("Using cached password");
-                stored
+                println!("Using saved password from keychain");
+                (stored, true)
             }
-            None => rpassword::prompt_password("Password: ")?,
+            None => {
+                let prompt = format!("Password for {}@{}: ", username, config.vpn.gateway);
+                (rpassword::prompt_password(&prompt)?, false)
+            }
         }
     } else {
-        rpassword::prompt_password("Password: ")?
+        let prompt = format!("Password for {}@{}: ", username, config.vpn.gateway);
+        (rpassword::prompt_password(&prompt)?, false)
     };
 
     // 5. Do auth flow
@@ -577,15 +610,39 @@ async fn spawn_daemon(
     let prelogin = gp::auth::prelogin(&config.vpn.gateway).await?;
     info!("Auth method: {:?}", prelogin.auth_method);
 
-    println!("Logging in (check phone for DUO push)...");
-    let login = gp::auth::login(&config.vpn.gateway, &username, &password, Some("push")).await?;
+    // Get DUO method from config
+    let duo_method = &config.preferences.duo_method;
+    let duo_passcode = if *duo_method == pmacs_vpn::DuoMethod::Passcode {
+        // Prompt for passcode
+        let code = rpassword::prompt_password("DUO passcode: ")?;
+        Some(code)
+    } else {
+        None
+    };
+
+    println!("Logging in ({})...", duo_method.description());
+    let duo_str = duo_passcode.as_deref().or_else(|| duo_method.as_auth_str());
+    let login = gp::auth::login(&config.vpn.gateway, &username, &password, duo_str).await?;
     println!("Login successful!");
 
-    // 6. Save password if requested
+    // 6. Save password if requested or offer to save
     if save_password {
         match pmacs_vpn::store_password(&username, &password) {
-            Ok(()) => println!("Password saved for next time"),
+            Ok(()) => println!("Password saved to keychain"),
             Err(e) => warn!("Failed to store password: {}", e),
+        }
+    } else if !was_cached {
+        // First-time user - ask if they want to save
+        print!("Save password to keychain for next time? [Y/n]: ");
+        std::io::Write::flush(&mut std::io::stdout())?;
+        let mut input = String::new();
+        std::io::stdin().read_line(&mut input)?;
+        let input = input.trim().to_lowercase();
+        if input.is_empty() || input == "y" || input == "yes" {
+            match pmacs_vpn::store_password(&username, &password) {
+                Ok(()) => println!("Password saved to keychain"),
+                Err(e) => warn!("Failed to store password: {}", e),
+            }
         }
     }
 
@@ -718,6 +775,7 @@ async fn connect_vpn(user: Option<String>, save_password: bool, forget_password:
                 username: Some(username_input),
             },
             hosts,
+            preferences: pmacs_vpn::Preferences::default(),
         };
 
         (config, save)
@@ -744,18 +802,22 @@ async fn connect_vpn(user: Option<String>, save_password: bool, forget_password:
     }
 
     // 4. Get password (from keychain or prompt)
-    let password = if !forget_password {
+    let (password, was_cached) = if !forget_password {
         // Try to get stored password first
         match pmacs_vpn::get_password(&username) {
             Some(stored) => {
-                println!("Using cached password");
-                stored
+                println!("Using saved password from keychain");
+                (stored, true)
             }
-            None => rpassword::prompt_password("Password: ")?,
+            None => {
+                let prompt = format!("Password for {}@{}: ", username, config.vpn.gateway);
+                (rpassword::prompt_password(&prompt)?, false)
+            }
         }
     } else {
         // --forget-password was passed, always prompt
-        rpassword::prompt_password("Password: ")?
+        let prompt = format!("Password for {}@{}: ", username, config.vpn.gateway);
+        (rpassword::prompt_password(&prompt)?, false)
     };
 
     // 5. Auth flow
@@ -763,15 +825,39 @@ async fn connect_vpn(user: Option<String>, save_password: bool, forget_password:
     let prelogin = gp::auth::prelogin(&config.vpn.gateway).await?;
     info!("Auth method: {:?}", prelogin.auth_method);
 
-    println!("Logging in (check phone for DUO push)...");
-    let login = gp::auth::login(&config.vpn.gateway, &username, &password, Some("push")).await?;
+    // Get DUO method from config
+    let duo_method = &config.preferences.duo_method;
+    let duo_passcode = if *duo_method == pmacs_vpn::DuoMethod::Passcode {
+        // Prompt for passcode
+        let code = rpassword::prompt_password("DUO passcode: ")?;
+        Some(code)
+    } else {
+        None
+    };
+
+    println!("Logging in ({})...", duo_method.description());
+    let duo_str = duo_passcode.as_deref().or_else(|| duo_method.as_auth_str());
+    let login = gp::auth::login(&config.vpn.gateway, &username, &password, duo_str).await?;
     println!("Login successful!");
 
-    // 6. Save password if requested
+    // 6. Save password if requested or offer to save
     if save_password {
         match pmacs_vpn::store_password(&username, &password) {
-            Ok(()) => println!("Password saved for next time"),
+            Ok(()) => println!("Password saved to keychain"),
             Err(e) => warn!("Failed to store password: {}", e),
+        }
+    } else if !was_cached {
+        // First-time user - ask if they want to save
+        print!("Save password to keychain for next time? [Y/n]: ");
+        std::io::Write::flush(&mut std::io::stdout())?;
+        let mut input = String::new();
+        std::io::stdin().read_line(&mut input)?;
+        let input = input.trim().to_lowercase();
+        if input.is_empty() || input == "y" || input == "yes" {
+            match pmacs_vpn::store_password(&username, &password) {
+                Ok(()) => println!("Password saved to keychain"),
+                Err(e) => warn!("Failed to store password: {}", e),
+            }
         }
     }
 

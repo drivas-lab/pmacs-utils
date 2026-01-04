@@ -12,10 +12,78 @@ pub enum ConfigError {
     ParseError(#[from] toml::de::Error),
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
+#[serde(rename_all = "lowercase")]
+pub enum DuoMethod {
+    #[default]
+    Push,
+    Sms,
+    Call,
+    Passcode,
+}
+
+impl DuoMethod {
+    /// Convert to the string used by GlobalProtect auth API
+    pub fn as_auth_str(&self) -> Option<&'static str> {
+        match self {
+            DuoMethod::Push => Some("push"),
+            DuoMethod::Sms => Some("sms1"),  // DUO uses sms1 for first SMS
+            DuoMethod::Call => Some("phone1"), // DUO uses phone1 for first phone
+            DuoMethod::Passcode => None,  // User will be prompted for passcode
+        }
+    }
+
+    /// Get user-friendly description for prompts
+    pub fn description(&self) -> &'static str {
+        match self {
+            DuoMethod::Push => "DUO push",
+            DuoMethod::Sms => "DUO SMS",
+            DuoMethod::Call => "DUO phone call",
+            DuoMethod::Passcode => "DUO passcode",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Preferences {
+    /// Save password to OS keychain
+    #[serde(default = "default_true")]
+    pub save_password: bool,
+
+    /// DUO authentication method
+    #[serde(default)]
+    pub duo_method: DuoMethod,
+
+    /// Start VPN at system login
+    #[serde(default)]
+    pub start_at_login: bool,
+
+    /// Auto-connect when tray starts (if credentials cached)
+    #[serde(default = "default_true")]
+    pub auto_connect: bool,
+}
+
+fn default_true() -> bool {
+    true
+}
+
+impl Default for Preferences {
+    fn default() -> Self {
+        Self {
+            save_password: true,
+            duo_method: DuoMethod::default(),
+            start_at_login: false,
+            auto_connect: true,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Config {
     pub vpn: VpnConfig,
     pub hosts: Vec<String>,
+    #[serde(default)]
+    pub preferences: Preferences,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -36,6 +104,7 @@ impl Default for Config {
                 username: None,
             },
             hosts: vec!["prometheus.pmacs.upenn.edu".to_string()],
+            preferences: Preferences::default(),
         }
     }
 }
@@ -97,6 +166,7 @@ mod tests {
                 "host1.example.com".to_string(),
                 "host2.example.com".to_string(),
             ],
+            preferences: Preferences::default(),
         };
         config.save(&config_path).unwrap();
 
@@ -137,5 +207,156 @@ mod tests {
         assert!(content.contains("gateway"));
         assert!(content.contains("protocol"));
         assert!(content.contains("hosts"));
+    }
+
+    #[test]
+    fn test_preferences_default() {
+        let prefs = Preferences::default();
+        assert_eq!(prefs.save_password, true);
+        assert_eq!(prefs.duo_method, DuoMethod::Push);
+        assert_eq!(prefs.start_at_login, false);
+        assert_eq!(prefs.auto_connect, true);
+    }
+
+    #[test]
+    fn test_preferences_serialization() {
+        let prefs = Preferences {
+            save_password: false,
+            duo_method: DuoMethod::Sms,
+            start_at_login: true,
+            auto_connect: false,
+        };
+
+        let toml_str = toml::to_string(&prefs).unwrap();
+        assert!(toml_str.contains("save_password = false"));
+        assert!(toml_str.contains("duo_method = \"sms\""));
+        assert!(toml_str.contains("start_at_login = true"));
+        assert!(toml_str.contains("auto_connect = false"));
+    }
+
+    #[test]
+    fn test_preferences_deserialization() {
+        let toml_str = r#"
+            save_password = false
+            duo_method = "call"
+            start_at_login = true
+            auto_connect = false
+        "#;
+
+        let prefs: Preferences = toml::from_str(toml_str).unwrap();
+        assert_eq!(prefs.save_password, false);
+        assert_eq!(prefs.duo_method, DuoMethod::Call);
+        assert_eq!(prefs.start_at_login, true);
+        assert_eq!(prefs.auto_connect, false);
+    }
+
+    #[test]
+    fn test_duo_method_values() {
+        // Test that all enum variants work correctly
+        let methods = vec![
+            DuoMethod::Push,
+            DuoMethod::Sms,
+            DuoMethod::Call,
+            DuoMethod::Passcode,
+        ];
+
+        for method in methods {
+            // Ensure they can be cloned and compared
+            let cloned = method.clone();
+            assert_eq!(method, cloned);
+        }
+
+        // Test default
+        assert_eq!(DuoMethod::default(), DuoMethod::Push);
+    }
+
+    #[test]
+    fn test_duo_method_in_preferences_serialization() {
+        // Test serialization in context of a struct
+        let prefs = Preferences {
+            save_password: true,
+            duo_method: DuoMethod::Sms,
+            start_at_login: false,
+            auto_connect: true,
+        };
+
+        let toml_str = toml::to_string(&prefs).unwrap();
+        assert!(toml_str.contains("duo_method = \"sms\""));
+
+        // Test deserialization
+        let deserialized: Preferences = toml::from_str(&toml_str).unwrap();
+        assert_eq!(deserialized.duo_method, DuoMethod::Sms);
+    }
+
+    #[test]
+    fn test_config_with_preferences() {
+        let temp_dir = TempDir::new().unwrap();
+        let config_path = temp_dir.path().join("prefs-test.toml");
+
+        let mut config = Config::default();
+        config.preferences.save_password = false;
+        config.preferences.duo_method = DuoMethod::Passcode;
+        config.preferences.start_at_login = true;
+
+        config.save(&config_path).unwrap();
+        let loaded = Config::load(&config_path).unwrap();
+
+        assert_eq!(loaded.preferences.save_password, false);
+        assert_eq!(loaded.preferences.duo_method, DuoMethod::Passcode);
+        assert_eq!(loaded.preferences.start_at_login, true);
+        assert_eq!(loaded.preferences.auto_connect, true); // Still defaults to true
+    }
+
+    #[test]
+    fn test_backward_compatibility_missing_preferences() {
+        let temp_dir = TempDir::new().unwrap();
+        let config_path = temp_dir.path().join("old-config.toml");
+
+        // Simulate an old config file without preferences section
+        let old_config = r#"hosts = ["prometheus.pmacs.upenn.edu"]
+
+[vpn]
+gateway = "psomvpn.uphs.upenn.edu"
+protocol = "gp"
+"#;
+
+        std::fs::write(&config_path, old_config).unwrap();
+
+        let loaded = Config::load(&config_path).unwrap();
+
+        // Should use default preferences
+        assert_eq!(loaded.preferences.save_password, true);
+        assert_eq!(loaded.preferences.duo_method, DuoMethod::Push);
+        assert_eq!(loaded.preferences.start_at_login, false);
+        assert_eq!(loaded.preferences.auto_connect, true);
+    }
+
+    #[test]
+    fn test_partial_preferences_uses_defaults() {
+        let temp_dir = TempDir::new().unwrap();
+        let config_path = temp_dir.path().join("partial-prefs.toml");
+
+        // Config with only some preference fields
+        let partial_config = r#"hosts = ["prometheus.pmacs.upenn.edu"]
+
+[vpn]
+gateway = "psomvpn.uphs.upenn.edu"
+protocol = "gp"
+
+[preferences]
+duo_method = "sms"
+"#;
+
+        std::fs::write(&config_path, partial_config).unwrap();
+
+        let loaded = Config::load(&config_path).unwrap();
+
+        // Specified field
+        assert_eq!(loaded.preferences.duo_method, DuoMethod::Sms);
+
+        // Unspecified fields should use defaults
+        assert_eq!(loaded.preferences.save_password, true);
+        assert_eq!(loaded.preferences.start_at_login, false);
+        assert_eq!(loaded.preferences.auto_connect, true);
     }
 }
