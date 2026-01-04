@@ -1,10 +1,12 @@
 # pmacs-vpn
 
 Native GlobalProtect VPN client with split-tunneling for PMACS cluster access.
+Lighter and faster than GlobalProtect, written with Rust and pure spite.
 
 ## Why?
 
-The official GlobalProtect client routes *all* traffic through the VPN, which slows down your connection and sends personal browsing through institutional servers.
+The official GlobalProtect client routes *all* traffic through the VPN.
+This slows down everything, prevents access to Gmail, and is also really creepy.
 
 This tool only routes PMACS traffic through VPN, leaving everything else alone.
 
@@ -20,8 +22,8 @@ This tool only routes PMACS traffic through VPN, leaving everything else alone.
 | Platform | Status |
 |----------|--------|
 | Windows | **Working** |
-| macOS | Untested (help wanted) |
-| Linux | Untested (help wanted) |
+| macOS | **Working** |
+| Linux | Untested|
 
 ## Installation
 

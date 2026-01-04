@@ -91,7 +91,16 @@ fn is_admin() -> bool {
 
 /// Commands that require admin privileges
 fn requires_admin(cmd: &Commands) -> bool {
-    matches!(cmd, Commands::Connect { .. } | Commands::Disconnect | Commands::Tray)
+    match cmd {
+        Commands::Connect { .. } | Commands::Disconnect => true,
+        // On Windows, tray needs admin upfront (spawns daemon directly)
+        // On macOS/Linux, tray can run without admin and prompt when connecting
+        #[cfg(windows)]
+        Commands::Tray => true,
+        #[cfg(not(windows))]
+        Commands::Tray => false,
+        _ => false,
+    }
 }
 
 #[tokio::main]
@@ -308,7 +317,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
 
             info!("Starting system tray mode...");
-            run_tray_mode().await;
+
+            // On macOS, run tray synchronously on main thread (AppKit requirement)
+            #[cfg(target_os = "macos")]
+            {
+                run_tray_mode_sync();
+            }
+
+            // On Windows/Linux, run in async context
+            #[cfg(not(target_os = "macos"))]
+            {
+                run_tray_mode().await;
+            }
         }
     }
 
@@ -330,6 +350,7 @@ fn cleanup_vpn_on_exit() {
 }
 
 /// Run the VPN with system tray GUI
+#[cfg(not(target_os = "macos"))]
 async fn run_tray_mode() {
     use pmacs_vpn::tray::{TrayApp, TrayCommand, VpnStatus};
     use pmacs_vpn::notifications;
@@ -542,16 +563,363 @@ async fn run_tray_mode() {
     });
 
     // Run tray (this blocks until exit)
-    // Note: This will run on the current thread, not tokio
+    // On macOS: must run on main thread (AppKit requirement)
+    // On Windows: can run on spawned thread (with_any_thread)
+    #[cfg(target_os = "macos")]
+    {
+        // On macOS, we're already on a tokio runtime thread which is NOT the main thread
+        // We need to panic here and handle tray specially in main()
+        panic!("On macOS, tray must be started via run_tray_mode_sync(), not async run_tray_mode()");
+    }
+
+    #[cfg(not(target_os = "macos"))]
     let tray_handle = std::thread::spawn(move || {
         app.run();
     });
 
+    #[cfg(not(target_os = "macos"))]
     // Wait for tray to exit
     let _ = tray_handle.join();
 
     // Cleanup VPN when tray exits (regardless of how it exited)
     cleanup_vpn_on_exit();
+}
+
+/// Prompt for text input on macOS using osascript
+#[cfg(target_os = "macos")]
+fn macos_prompt_text(title: &str, message: &str, default: &str) -> Option<String> {
+    use tracing::debug;
+
+    let script = format!(
+        r#"display dialog "{}" default answer "{}" with title "{}" buttons {{"Cancel", "OK"}} default button "OK""#,
+        message, default, title
+    );
+
+    debug!("Running osascript for text prompt");
+
+    match std::process::Command::new("osascript")
+        .args(["-e", &script])
+        .output()
+    {
+        Ok(output) => {
+            debug!("osascript exited with status: {:?}", output.status);
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            debug!("osascript stdout: {}", stdout);
+            if !stderr.is_empty() {
+                debug!("osascript stderr: {}", stderr);
+            }
+
+            if output.status.success() {
+                // Parse "button returned:OK, text returned:VALUE"
+                if let Some(pos) = stdout.find("text returned:") {
+                    let value = stdout[pos + 14..].trim();
+                    debug!("Parsed text value: {}", value);
+                    Some(value.to_string())
+                } else {
+                    debug!("Could not find 'text returned:' in output");
+                    None
+                }
+            } else {
+                debug!("osascript failed or was cancelled");
+                None
+            }
+        }
+        Err(e) => {
+            debug!("Failed to run osascript: {}", e);
+            None
+        }
+    }
+}
+
+/// Prompt for password input on macOS using osascript
+#[cfg(target_os = "macos")]
+fn macos_prompt_password(title: &str, message: &str) -> Option<String> {
+    use tracing::debug;
+
+    let script = format!(
+        r#"display dialog "{}" default answer "" with hidden answer with title "{}" buttons {{"Cancel", "OK"}} default button "OK""#,
+        message, title
+    );
+
+    debug!("Running osascript for password prompt");
+
+    match std::process::Command::new("osascript")
+        .args(["-e", &script])
+        .output()
+    {
+        Ok(output) => {
+            debug!("Password osascript exited with status: {:?}", output.status);
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            debug!("Password osascript stdout: {}", stdout);
+            if !stderr.is_empty() {
+                debug!("Password osascript stderr: {}", stderr);
+            }
+
+            if output.status.success() {
+                // Parse "text returned:VALUE"
+                if let Some(pos) = stdout.find("text returned:") {
+                    let value = stdout[pos + 14..].trim();
+                    debug!("Parsed password (length: {})", value.len());
+                    Some(value.to_string())
+                } else {
+                    debug!("Could not find 'text returned:' in password output");
+                    None
+                }
+            } else {
+                debug!("Password osascript failed or was cancelled");
+                None
+            }
+        }
+        Err(e) => {
+            debug!("Failed to run password osascript: {}", e);
+            None
+        }
+    }
+}
+
+/// Run tray mode synchronously on the main thread (required for macOS)
+/// This creates its own tokio runtime for async operations.
+#[cfg(target_os = "macos")]
+fn run_tray_mode_sync() {
+    use pmacs_vpn::tray::{TrayApp, TrayCommand, VpnStatus};
+    use pmacs_vpn::notifications;
+
+    // Set up Ctrl+C handler
+    let _ = ctrlc::set_handler(move || {
+        cleanup_vpn_on_exit();
+        std::process::exit(0);
+    });
+
+    // Check config and credentials
+    let config_path = std::path::PathBuf::from("pmacs-vpn.toml");
+    let (auto_connect, save_password, duo_method) = if config_path.exists() {
+        if let Ok(config) = pmacs_vpn::Config::load(&config_path) {
+            let has_cached_password = if let Some(ref username) = config.vpn.username {
+                pmacs_vpn::get_password(username).is_some()
+            } else {
+                false
+            };
+            (
+                has_cached_password,
+                config.preferences.save_password,
+                config.preferences.duo_method.clone(),
+            )
+        } else {
+            (false, true, pmacs_vpn::DuoMethod::default())
+        }
+    } else {
+        (false, true, pmacs_vpn::DuoMethod::default())
+    };
+
+    if !auto_connect {
+        notifications::notify_setup_required();
+    }
+
+    // Create tray app
+    let (app, command_rx, status_tx) = TrayApp::new(auto_connect, save_password, duo_method);
+
+    // Create tokio runtime for async operations
+    let rt = tokio::runtime::Runtime::new().expect("Failed to create tokio runtime");
+
+    // Clone for command handler
+    let status_tx_clone = status_tx.clone();
+
+    // Spawn command handler in background
+    rt.spawn(async move {
+        while let Ok(cmd) = command_rx.recv() {
+            match cmd {
+                TrayCommand::Connect => {
+                    info!("Tray: Received connect command");
+                    let _ = status_tx_clone.send(VpnStatus::Connecting);
+
+                    let config_path = std::path::PathBuf::from("pmacs-vpn.toml");
+
+                    // Auto-create config if it doesn't exist
+                    let config = if config_path.exists() {
+                        match pmacs_vpn::Config::load(&config_path) {
+                            Ok(c) => c,
+                            Err(e) => {
+                                let _ = status_tx_clone.send(VpnStatus::Error(format!("Config error: {}", e)));
+                                continue;
+                            }
+                        }
+                    } else {
+                        info!("No config found, creating default");
+                        let default_config = pmacs_vpn::Config::default();
+                        if let Err(e) = default_config.save(&config_path) {
+                            let _ = status_tx_clone.send(VpnStatus::Error(format!("Failed to create config: {}", e)));
+                            continue;
+                        }
+                        default_config
+                    };
+
+                    let username = config.vpn.username.clone().unwrap_or_default();
+
+                    // Check if password is cached; if not, prompt with osascript
+                    if username.is_empty() || pmacs_vpn::get_password(&username).is_none() {
+                        info!("No cached password, prompting user");
+
+                        // Prompt for username if not set
+                        let prompted_username = if username.is_empty() {
+                            match macos_prompt_text("PMACS VPN", "Enter your username:", "") {
+                                Some(u) if !u.is_empty() => u,
+                                _ => {
+                                    let _ = status_tx_clone.send(VpnStatus::Disconnected);
+                                    continue;
+                                }
+                            }
+                        } else {
+                            username.clone()
+                        };
+
+                        // Prompt for password
+                        let password = match macos_prompt_password("PMACS VPN", &format!("Enter password for {}:", prompted_username)) {
+                            Some(p) if !p.is_empty() => p,
+                            _ => {
+                                let _ = status_tx_clone.send(VpnStatus::Disconnected);
+                                continue;
+                            }
+                        };
+
+                        // Save password to keychain
+                        if let Err(e) = pmacs_vpn::store_password(&prompted_username, &password) {
+                            let _ = status_tx_clone.send(VpnStatus::Error(format!("Failed to save password: {}", e)));
+                            continue;
+                        }
+
+                        // Update config with username
+                        if username.is_empty() {
+                            let mut updated_config = config.clone();
+                            updated_config.vpn.username = Some(prompted_username.clone());
+                            let _ = updated_config.save(&config_path);
+                        }
+                    }
+
+                    notifications::notify_duo_push();
+
+                    // Connect with admin privileges via osascript
+                    let exe_path = std::env::current_exe().unwrap_or_default();
+                    let cwd = std::env::current_dir().unwrap_or_default();
+                    let script = format!(
+                        r#"do shell script "cd '{}' && '{}' connect --daemon" with administrator privileges"#,
+                        cwd.display(),
+                        exe_path.display()
+                    );
+
+                    info!("Requesting admin privileges for VPN connect");
+                    match std::process::Command::new("osascript")
+                        .args(["-e", &script])
+                        .output()
+                    {
+                        Ok(output) if output.status.success() => {
+                            // Poll for connection status
+                            for _ in 0..60 {
+                                std::thread::sleep(std::time::Duration::from_millis(500));
+                                if let Ok(Some(state)) = pmacs_vpn::VpnState::load() {
+                                    if state.is_daemon_running() {
+                                        notifications::notify_connected();
+                                        let _ = status_tx_clone.send(VpnStatus::Connected {
+                                            ip: state.gateway.to_string(),
+                                        });
+                                        break;
+                                    }
+                                }
+                            }
+                        }
+                        Ok(output) => {
+                            let stderr = String::from_utf8_lossy(&output.stderr);
+                            if stderr.contains("User canceled") || stderr.contains("(-128)") {
+                                let _ = status_tx_clone.send(VpnStatus::Disconnected);
+                            } else {
+                                let _ = status_tx_clone.send(VpnStatus::Error(
+                                    format!("Connect failed: {}", stderr.lines().next().unwrap_or("unknown error"))
+                                ));
+                            }
+                        }
+                        Err(e) => {
+                            let _ = status_tx_clone.send(VpnStatus::Error(format!("Failed to run osascript: {}", e)));
+                        }
+                    }
+                }
+                TrayCommand::Disconnect => {
+                    info!("Tray: Received disconnect command");
+                    let _ = status_tx_clone.send(VpnStatus::Disconnecting);
+
+                    if let Ok(Some(state)) = pmacs_vpn::VpnState::load() {
+                        if state.pid.is_some() && state.is_daemon_running() {
+                            let _ = state.kill_daemon();
+                        }
+                    }
+
+                    // Note: cleanup requires sudo on macOS, but we at least kill the daemon
+                    let _ = status_tx_clone.send(VpnStatus::Disconnected);
+                }
+                TrayCommand::ShowStatus => {
+                    info!("Tray: Show status requested");
+                }
+                TrayCommand::ToggleSavePassword => {
+                    info!("Tray: Toggle save password preference");
+                    if let Ok(mut config) = pmacs_vpn::Config::load(&config_path) {
+                        config.preferences.save_password = !config.preferences.save_password;
+                        let _ = config.save(&config_path);
+                    }
+                }
+                TrayCommand::SetDuoMethod(method) => {
+                    info!("Tray: Set DUO method to {:?}", method);
+                    if let Ok(mut config) = pmacs_vpn::Config::load(&config_path) {
+                        config.preferences.duo_method = method;
+                        let _ = config.save(&config_path);
+                    }
+                }
+                TrayCommand::Exit => {
+                    info!("Tray: Exit requested");
+                    if let Ok(Some(state)) = pmacs_vpn::VpnState::load() {
+                        if state.pid.is_some() && state.is_daemon_running() {
+                            let _ = state.kill_daemon();
+                        }
+                    }
+                    break;
+                }
+            }
+        }
+    });
+
+    // Check initial state
+    if let Ok(Some(state)) = pmacs_vpn::VpnState::load() {
+        if state.is_daemon_running() {
+            let _ = status_tx.send(VpnStatus::Connected {
+                ip: state.gateway.to_string(),
+            });
+        }
+    }
+
+    // Spawn health monitor
+    let status_tx_health = status_tx.clone();
+    rt.spawn(async move {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        static WAS_CONNECTED: AtomicBool = AtomicBool::new(false);
+
+        loop {
+            tokio::time::sleep(tokio::time::Duration::from_secs(5)).await;
+            if let Ok(Some(state)) = pmacs_vpn::VpnState::load() {
+                if state.pid.is_some() {
+                    if state.is_daemon_running() {
+                        WAS_CONNECTED.store(true, Ordering::Relaxed);
+                    } else if WAS_CONNECTED.swap(false, Ordering::Relaxed) {
+                        info!("Health monitor: Daemon died unexpectedly");
+                        notifications::notify_error("VPN disconnected unexpectedly");
+                        let _ = status_tx_health.send(VpnStatus::Disconnected);
+                    }
+                }
+            }
+        }
+    });
+
+    // Run tray on main thread (required for macOS AppKit)
+    // Note: app.run() never returns (-> !), cleanup happens in Exit handler
+    app.run();
 }
 
 /// Spawn VPN as a detached background process (daemon mode)

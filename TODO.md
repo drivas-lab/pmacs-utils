@@ -46,15 +46,30 @@ Native GlobalProtect client **working on Windows**:
 
 ## Next Priority
 
-### 1. macOS Testing
-**Status:** Not started
+### 1. macOS Tray - IN PROGRESS
+**Status:** Partially working
 **Effort:** Medium
 
-Test on macOS:
-- [ ] TUN device creation (utun)
-- [ ] Route commands (`route add`)
-- [ ] Hosts file (`/etc/hosts`)
-- [ ] Credential storage (Keychain)
+Completed:
+- [x] Build and 78 tests pass, clippy clean
+- [x] Menu bar tray icon appears (tao + tray-icon crates)
+- [x] Keychain password storage (keyring crate → Security.framework)
+- [x] Notifications (notify-rust)
+- [x] Start at Login (LaunchAgent plist)
+- [x] osascript username dialog works
+
+**Bug to fix:**
+Password dialog not appearing after username prompt - tray exits immediately.
+Debug logging added to `macos_prompt_password()` in main.rs.
+
+Run with verbose to debug: `./target/release/pmacs-vpn -v tray`
+
+**Architecture:**
+- `run_tray_mode_sync()` - macOS-specific, runs tray on main thread (AppKit requirement)
+- `macos_prompt_text/password()` - osascript dialogs for login
+- Admin privileges requested via `osascript ... with administrator privileges`
+
+**Future improvement:** Replace osascript with NSPopover for native login popup near tray (like GlobalProtect)
 
 ### 2. Linux Testing
 **Status:** Not started

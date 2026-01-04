@@ -172,10 +172,6 @@ fn ensure_wintun_dll() -> Result<(), TunError> {
     Ok(())
 }
 
-#[cfg(not(windows))]
-fn ensure_wintun_dll() -> Result<(), TunError> {
-    Ok(())
-}
 
 #[cfg(test)]
 mod tests {

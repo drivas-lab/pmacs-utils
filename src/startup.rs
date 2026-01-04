@@ -18,6 +18,7 @@ use windows::Win32::System::Registry::{
 #[cfg(windows)]
 use windows::core::PCWSTR;
 
+#[cfg(windows)]
 const APP_NAME: &str = "PMACS VPN";
 
 #[derive(Error, Debug)]

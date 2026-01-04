@@ -249,6 +249,7 @@ fn build_dns_query(hostname: &str) -> Vec<u8> {
 fn query_dns_server(
     query: &[u8],
     server: SocketAddr,
+    #[cfg_attr(not(windows), allow(unused_variables))]
     interface_index: Option<u32>,
 ) -> Result<Ipv4Addr, String> {
     let socket = UdpSocket::bind("0.0.0.0:0").map_err(|e| format!("bind failed: {}", e))?;

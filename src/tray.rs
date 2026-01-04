@@ -126,7 +126,7 @@ impl TrayApp {
         let disconnect_item = MenuItem::new("Disconnect", false, None);
 
         // Preferences menu items
-        let save_password_item = CheckMenuItem::new("Save Password", true, self.save_password, None);
+        let save_password_item = CheckMenuItem::new("Stay logged in", true, self.save_password, None);
 
         // DUO method submenu
         let duo_submenu = Submenu::new("DUO Method", true);
