@@ -31,6 +31,7 @@ Native GlobalProtect client **working on Windows**:
 - [x] Tray checks for cached credentials before connecting
 - [x] Poll-based connection status (replaced hardcoded 5s wait)
 - [x] Session watchdog with 16hr expiry warnings
+- [x] Health monitor detects daemon death after sleep/wake
 
 ### UX Improvements
 - [x] Upfront admin privilege check with clear error message
@@ -74,6 +75,7 @@ Translate system errors to user-friendly messages:
 - [ ] DNS resolution failures
 - [ ] Network timeout hints
 - [ ] DUO timeout guidance
+- [ ] Credential expiry (prompt to run `--save-password` again)
 
 ## Nice to Have
 
@@ -94,6 +96,11 @@ gateway = "psomvpn.uphs.upenn.edu"
 [profiles.other]
 gateway = "other.example.com"
 ```
+
+### 6. Tray UX Polish
+- [ ] Reconnect button after unexpected disconnect (vs clicking Connect again)
+- [ ] Connection uptime in tooltip
+- [ ] Network transition handling (WiFi→Ethernet, etc.)
 
 ## Technical Debt
 
