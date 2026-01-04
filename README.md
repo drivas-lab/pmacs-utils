@@ -23,16 +23,32 @@ This tool only routes PMACS traffic through VPN, leaving everything else alone.
 | macOS | Untested (help wanted) |
 | Linux | Untested (help wanted) |
 
-## Setup
+## Installation
 
-### Prerequisites
+### Download (Recommended)
 
-1. Build the binary:
-   ```bash
-   cargo build --release
-   ```
+Download the latest release for your platform from [GitHub Releases](../../releases):
 
-2. The binary is at `target/release/pmacs-vpn` (`.exe` on Windows)
+| Platform | File |
+|----------|------|
+| Windows | `pmacs-vpn-x86_64-pc-windows-msvc.exe` |
+| macOS (Intel) | `pmacs-vpn-x86_64-apple-darwin` |
+| macOS (Apple Silicon) | `pmacs-vpn-aarch64-apple-darwin` |
+| Linux | `pmacs-vpn-x86_64-unknown-linux-gnu` |
+
+Place the binary somewhere in your PATH and make it executable (Unix):
+```bash
+chmod +x pmacs-vpn-*
+sudo mv pmacs-vpn-* /usr/local/bin/pmacs-vpn
+```
+
+### Build from Source
+
+If you prefer to build yourself:
+```bash
+cargo build --release
+# Binary at: target/release/pmacs-vpn(.exe)
+```
 
 ### First-Time Setup
 
