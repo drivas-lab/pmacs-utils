@@ -1,187 +1,248 @@
 # pmacs-vpn
 
 Native GlobalProtect VPN client with split-tunneling for PMACS cluster access.
-Lighter and faster than GlobalProtect, written with Rust and pure spite.
 
 ## Why?
 
-The official GlobalProtect client routes *all* traffic through the VPN.
-This slows down everything, prevents access to Gmail, and is also really creepy.
+The official GlobalProtect client routes *all* traffic through the VPN, which:
+- Slows down your internet
+- Blocks access to Gmail and other services
+- Sends all your traffic through institutional servers
 
 This tool only routes PMACS traffic through VPN, leaving everything else alone.
 
-## Features
-
-- **Split-tunnel** — only PMACS traffic goes through VPN
-- **Single binary** — no OpenConnect, no Python, no Java
-- **Credential caching** — password stored in OS keychain
-- **Background mode** — runs as daemon or system tray
-
 ## Platform Status
 
-| Platform | Status |
-|----------|--------|
-| Windows | **Working** |
-| macOS | **Working** |
-| Linux | Untested|
+| Platform | CLI | System Tray |
+|----------|-----|-------------|
+| Windows | ✅ Working | ✅ Working |
+| macOS | ✅ Working | ⚠️ In Development |
+| Linux | Untested | Untested |
 
-## Installation
+---
 
-### Download (Recommended)
+## Quick Start (macOS)
 
-Download the latest release for your platform from [GitHub Releases](../../releases):
+### Step 1: Download
 
-| Platform | File |
-|----------|------|
-| Windows | `pmacs-vpn-x86_64-pc-windows-msvc.exe` |
-| macOS (Intel) | `pmacs-vpn-x86_64-apple-darwin` |
-| macOS (Apple Silicon) | `pmacs-vpn-aarch64-apple-darwin` |
-| Linux | `pmacs-vpn-x86_64-unknown-linux-gnu` |
+Download the binary for your Mac:
+- **Apple Silicon (M1/M2/M3):** `pmacs-vpn-aarch64-apple-darwin`
+- **Intel Mac:** `pmacs-vpn-x86_64-apple-darwin`
 
-Place the binary somewhere in your PATH and make it executable (Unix):
+From: [GitHub Releases](../../releases)
+
+### Step 2: Install
+
+Open Terminal and run:
+
 ```bash
+# Go to your Downloads folder
+cd ~/Downloads
+
+# Make it executable
 chmod +x pmacs-vpn-*
+
+# Move to a system location (enter your Mac password when prompted)
 sudo mv pmacs-vpn-* /usr/local/bin/pmacs-vpn
 ```
 
-### Build from Source
+### Step 3: First-Time Setup
 
-If you prefer to build yourself:
 ```bash
-cargo build --release
-# Binary at: target/release/pmacs-vpn(.exe)
+# Create config and save your password
+sudo pmacs-vpn connect --save-password
 ```
 
-### First-Time Setup
+**What happens:**
+1. Creates `pmacs-vpn.toml` config file
+2. Prompts for your **PMACS password** (type it, press Enter)
+3. Prompts for **keychain access** (click "Always Allow" to avoid future prompts)
+4. Sends a **DUO push** to your phone — approve it
+5. Shows "Tunnel running" when connected
+
+**⚠️ Keep this terminal window open!** The VPN runs in the foreground.
+
+### Step 4: Test the Connection
+
+Open a **new terminal window** and try:
 
 ```bash
-# Run once to set up config and cache password
-pmacs-vpn connect --save-password
-
-# Enter your password when prompted
-# Approve the DUO push on your phone
-# Ctrl+C to disconnect when done
+ssh prometheus.pmacs.upenn.edu
 ```
 
-This creates `pmacs-vpn.toml` and stores your password in the OS keychain.
+If SSH connects, you're done! 🎉
 
-### Daily Use
+### Step 5: Disconnect
 
-After first-time setup, connecting is simple:
+Go back to the VPN terminal and press `Ctrl+C`.
+
+---
+
+## Daily Use (macOS)
+
+Once set up, connecting is simple:
 
 ```bash
-pmacs-vpn connect
-# Just approve DUO - no password needed
+sudo pmacs-vpn connect
 ```
 
-## Commands
+- No password prompt (uses saved keychain password)
+- Just approve the DUO push on your phone
+- Keep terminal open while working
+- `Ctrl+C` to disconnect
 
-| Command | Description |
-|---------|-------------|
-| `connect` | Connect to VPN |
-| `disconnect` | Disconnect and clean up |
-| `status` | Show connection status |
-| `init` | Generate default config |
-| `tray` | Run with system tray (GUI mode) |
+### Background Mode
 
-### Connect Options
-
-| Option | Description |
-|--------|-------------|
-| `--save-password` | Store password in OS keychain |
-| `--forget-password` | Clear stored password, prompt fresh |
-| `-u, --user <USER>` | Override username |
-| `--daemon` | Run in background (frees terminal) |
-| `--keep-alive` | Aggressive keepalive (10s vs 30s) |
-
-## Background Mode
-
-Run VPN without keeping a terminal open:
+Don't want to keep a terminal open? Use daemon mode:
 
 ```bash
-# Start in background
-pmacs-vpn connect --daemon
+# Start VPN in background
+sudo pmacs-vpn connect --daemon
 
-# Check status anytime
+# Check if connected (from any terminal)
 pmacs-vpn status
 
-# Stop
-pmacs-vpn disconnect
+# Disconnect when done
+sudo pmacs-vpn disconnect
 ```
 
-## System Tray (Windows)
+---
 
-The recommended way to use the VPN:
+## Quick Start (Windows)
 
-```bash
+### Step 1: Download
+
+Download `pmacs-vpn-x86_64-pc-windows-msvc.exe` from [GitHub Releases](../../releases).
+
+### Step 2: First-Time Setup
+
+Open **Command Prompt as Administrator** and run:
+
+```cmd
+cd Downloads
+pmacs-vpn-x86_64-pc-windows-msvc.exe connect --save-password
+```
+
+Follow the prompts (password, DUO push).
+
+### Step 3: System Tray (Recommended)
+
+After first-time setup, use the system tray for daily use:
+
+```cmd
 pmacs-vpn tray
 ```
 
-Features:
-- **Auto-connects** if password is cached
-- **Toast notifications** for DUO push and connection status
-- **"Start with Windows"** option in menu (shows in Task Manager)
-- Runs completely hidden (no terminal window)
+- Auto-connects using cached password
+- Toast notifications for DUO and connection status
+- Right-click tray icon for Connect/Disconnect/Exit
+- Enable "Start with Windows" in the menu
 
-Right-click the tray icon for Connect/Disconnect/Exit.
-
-**First time:** Run `pmacs-vpn connect --save-password` once to cache credentials.
-
-## Windows Desktop Shortcuts
-
-Create desktop shortcuts for easy access:
-
-```powershell
-# Run from project directory
-.\scripts\create-shortcuts.ps1
-```
-
-This creates:
-- **PMACS VPN Tray** — Main shortcut (recommended)
-- **PMACS VPN Connect** — CLI connect
-- **PMACS VPN Disconnect** — CLI disconnect
+---
 
 ## Configuration
 
-The config file `pmacs-vpn.toml` is created automatically on first run, or manually:
+The config file `pmacs-vpn.toml` is created on first run:
 
 ```toml
 [vpn]
 gateway = "psomvpn.uphs.upenn.edu"
-username = "your-username"
+username = "your-pennkey"
 
 hosts = [
     "prometheus.pmacs.upenn.edu",
 ]
 ```
 
-Add more hosts to route additional servers through VPN.
+**Add more hosts** if you need to access other PMACS servers:
+
+```toml
+hosts = [
+    "prometheus.pmacs.upenn.edu",
+    "consign.pmacs.upenn.edu",
+    "some-other-server.pmacs.upenn.edu",
+]
+```
+
+---
+
+## Command Reference
+
+| Command | Description |
+|---------|-------------|
+| `connect` | Connect to VPN |
+| `connect --save-password` | Connect and save password to keychain |
+| `connect --daemon` | Connect in background (frees terminal) |
+| `disconnect` | Disconnect and clean up routes |
+| `status` | Show connection status |
+| `init` | Generate default config file |
+| `tray` | System tray mode (Windows only for now) |
+
+---
 
 ## Troubleshooting
 
-### "Access denied" / Permission errors
-Run as Administrator (Windows) or with `sudo` (macOS/Linux).
+### "Permission denied" or "Operation not permitted"
 
-### DUO push not received
-Check your phone is unlocked and Duo Mobile is installed.
-
-### Connection drops after a while
-Use `--keep-alive` for more aggressive keepalives. Sessions expire after 16 hours regardless.
-
-### SSH works but other tools timeout
-Add the server hostname to `hosts` in your config file.
-
-## Building
-
+You need to run with `sudo` on macOS:
 ```bash
-# Build release binary
-cargo build --release
-
-# Run tests
-cargo test
-
-# Check code quality
-cargo clippy
+sudo pmacs-vpn connect
 ```
 
-Windows embeds `wintun.dll` automatically — no manual setup needed.
+### Password prompt appears every time
+
+Run with `--save-password` once:
+```bash
+sudo pmacs-vpn connect --save-password
+```
+
+### Keychain keeps asking for permission (macOS)
+
+Click "Always Allow" when the keychain dialog appears. If you clicked "Deny", you may need to:
+1. Open Keychain Access
+2. Find "pmacs-vpn" entries
+3. Delete them
+4. Run `--save-password` again
+
+### DUO push not received
+
+- Make sure your phone is unlocked
+- Check Duo Mobile app is installed and configured
+- Try `--duo-method=call` for a phone call instead
+
+### SSH works but other tools don't
+
+Add the server to your config file's `hosts` list.
+
+### Connection drops after ~16 hours
+
+This is normal — GlobalProtect sessions expire. Just reconnect.
+
+### "Tunnel device not found" or TUN errors
+
+On macOS, you may need to allow the system extension. Check System Preferences → Security & Privacy.
+
+---
+
+## Building from Source
+
+```bash
+git clone https://github.com/psom/pmacs-vpn
+cd pmacs-vpn
+cargo build --release
+# Binary at: target/release/pmacs-vpn
+```
+
+Requirements: Rust 1.70+
+
+---
+
+## How It Works
+
+1. Authenticates with GlobalProtect using your credentials + DUO
+2. Establishes an SSL tunnel to the VPN gateway
+3. Creates a virtual network interface (TUN device)
+4. Routes only PMACS traffic through the tunnel
+5. All other traffic goes through your normal internet connection
+
+Unlike the official client, this never touches your non-PMACS traffic.
