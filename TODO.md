@@ -77,7 +77,16 @@ Translate system errors to user-friendly messages:
 
 ## Nice to Have
 
-### 4. Multiple Gateway Profiles
+### 4. Session Refresh (Re-auth Before Expiry)
+The official GP client prompts for DUO re-auth ~15 mins before session expires, extending without disconnect.
+
+To implement:
+- Detect approaching expiry (already have warnings)
+- Re-run auth flow with cached password + new DUO push
+- Get fresh authcookie and continue tunnel (or reconnect)
+- Needs investigation: can we refresh in-place or must reconnect?
+
+### 5. Multiple Gateway Profiles
 ```toml
 [profiles.pmacs]
 gateway = "psomvpn.uphs.upenn.edu"
@@ -85,9 +94,6 @@ gateway = "psomvpn.uphs.upenn.edu"
 [profiles.other]
 gateway = "other.example.com"
 ```
-
-### 5. Session Expiry Warning
-- Warn before 16hr session expires (notification)
 
 ## Technical Debt
 
