@@ -1,18 +1,16 @@
 # PMACS VPN - Improvement Roadmap
 
-## Current Status (2026-01-03)
+## Current Status (2026-01-04)
 
-Native GlobalProtect client **working on Windows**:
-- Full auth flow (password + DUO push)
-- SSL tunnel with bidirectional traffic
-- Split-tunnel routing
-- DNS resolution via VPN
-- Hosts file management
-- State persistence and cleanup
-- Credential caching (Windows Credential Manager)
-- Daemon mode (background operation)
-- System tray with GUI control
-- Upfront admin privilege check
+### Windows - Fully Working ✅
+- CLI and System Tray both work
+- Auto-connect, notifications, "Start with Windows"
+
+### macOS - CLI Working ✅, Tray Blocked ⚠️
+- **CLI works:** `sudo pmacs-vpn connect`
+- **Tray blocked:** Privilege escalation issue (see below)
+
+### Linux - Untested
 
 ## Completed
 
@@ -22,88 +20,91 @@ Native GlobalProtect client **working on Windows**:
 - [x] Split-tunnel routing for specified hosts
 - [x] Username in config file
 - [x] Credential caching (--save-password)
-- [x] Desktop shortcut workflow
+- [x] Desktop shortcut workflow (Windows)
 
-### Daemon & Tray Mode
+### Daemon & Tray Mode (Windows)
 - [x] `--daemon` flag for background operation
 - [x] Parent does auth, passes token to daemon child
 - [x] System tray (`pmacs-vpn tray`) with colored status icons
 - [x] Tray checks for cached credentials before connecting
-- [x] Poll-based connection status (replaced hardcoded 5s wait)
+- [x] Poll-based connection status
 - [x] Session watchdog with 16hr expiry warnings
 - [x] Health monitor detects daemon death after sleep/wake
-
-### UX Improvements
-- [x] Upfront admin privilege check with clear error message
-- [x] Interactive first-run config setup
-- [x] "Using cached password" feedback
-- [x] `tray.ps1` script with auto-elevation
-- [x] Improved connect.ps1 with status check
-- [x] Auto-connect on tray startup (if credentials cached)
 - [x] Toast notifications (DUO push, connected, disconnected)
-- [x] "Start with Windows" menu item (registry-based, visible in Task Manager)
-- [x] Setup notification for new users without credentials
+- [x] "Start with Windows" menu item
+
+### macOS CLI
+- [x] TUN device creation
+- [x] Route management
+- [x] Keychain credential storage
+- [x] Daemon mode (`--daemon`)
+
+---
 
 ## Next Priority
 
-### 1. macOS Tray - IN PROGRESS
-**Status:** Partially working
-**Effort:** Medium
+### 1. macOS Tray - BLOCKED on Privilege Escalation
 
-Completed:
-- [x] Build and 78 tests pass, clippy clean
-- [x] Menu bar tray icon appears (tao + tray-icon crates)
-- [x] Keychain password storage (keyring crate → Security.framework)
-- [x] Notifications (notify-rust)
-- [x] Start at Login (LaunchAgent plist)
-- [x] osascript username dialog works
+**Problem:** The tray app needs to spawn a root daemon for TUN device creation, but macOS's `osascript ... with administrator privileges` blocks until ALL child processes exit - including backgrounded daemons.
 
-**Bug to fix:**
-Password dialog not appearing after username prompt - tray exits immediately.
-Debug logging added to `macos_prompt_password()` in main.rs.
+**What we tried:**
+- `nohup command &` inside osascript → still blocks
+- `(command &)` subshell → still blocks
+- launchd with WatchPaths trigger → launchctl commands also block
+- Spawning osascript async → can't detect user cancellation
 
-Run with verbose to debug: `./target/release/pmacs-vpn -v tray`
+**Root cause:** This is by design in macOS. `do shell script ... with administrator privileges` waits for the entire process tree.
 
-**Architecture:**
-- `run_tray_mode_sync()` - macOS-specific, runs tray on main thread (AppKit requirement)
-- `macos_prompt_text/password()` - osascript dialogs for login
-- Admin privileges requested via `osascript ... with administrator privileges`
+**Proper fix: SMAppService (Privileged Helper)**
 
-**Future improvement:** Replace osascript with NSPopover for native login popup near tray (like GlobalProtect)
+This is how apps like Tunnelblick and Viscosity handle it:
+
+| Component | Description | Effort |
+|-----------|-------------|--------|
+| Helper binary | Separate `pmacs-vpn-helper` that runs as root | Medium |
+| XPC protocol | Messages: connect, disconnect, status | Small |
+| Code signing | Both app and helper must be signed | Medium |
+| Plist config | SMAuthorizedClients / SMPrivilegedExecutables | Small |
+| Build script | Embed helper in app bundle | Small |
+
+**Estimated effort:** 2-3 days
+
+**Current workaround:** Users run CLI mode:
+```bash
+sudo pmacs-vpn connect        # foreground
+sudo pmacs-vpn connect --daemon  # background
+```
+
+---
 
 ### 2. Linux Testing
 **Status:** Not started
 **Effort:** Medium
 
-Test on Linux:
 - [ ] TUN device creation
 - [ ] Route commands (`ip route add`)
-- [ ] Hosts file
+- [ ] Hosts file management
 - [ ] Credential storage (Secret Service)
 
-### 3. Better Error Messages
-**Status:** Partial
-**Effort:** Small
+---
 
-Translate system errors to user-friendly messages:
-- [x] Admin privilege check
-- [ ] DNS resolution failures
-- [ ] Network timeout hints
-- [ ] DUO timeout guidance
-- [ ] Credential expiry (prompt to run `--save-password` again)
+### 3. Code Signing (macOS)
+**Status:** Not started
+**Effort:** Small-Medium
+
+Benefits:
+- No keychain prompts (currently 2 prompts for unsigned app)
+- Gatekeeper approval
+- Required for SMAppService privileged helper
+
+---
 
 ## Nice to Have
 
-### 4. Session Refresh (Re-auth Before Expiry)
-The official GP client prompts for DUO re-auth ~15 mins before session expires, extending without disconnect.
+### Session Refresh
+Re-auth before 16hr expiry without disconnecting.
 
-To implement:
-- Detect approaching expiry (already have warnings)
-- Re-run auth flow with cached password + new DUO push
-- Get fresh authcookie and continue tunnel (or reconnect)
-- Needs investigation: can we refresh in-place or must reconnect?
-
-### 5. Multiple Gateway Profiles
+### Multiple Gateway Profiles
 ```toml
 [profiles.pmacs]
 gateway = "psomvpn.uphs.upenn.edu"
@@ -112,24 +113,9 @@ gateway = "psomvpn.uphs.upenn.edu"
 gateway = "other.example.com"
 ```
 
-### 6. Tray UX Polish
-- [ ] Reconnect button after unexpected disconnect (vs clicking Connect again)
-- [ ] Connection uptime in tooltip
-- [ ] Network transition handling (WiFi→Ethernet, etc.)
-
-## Technical Debt
-
-### ESP Mode Support
-Currently SSL-only. ESP (IPsec/UDP) would be faster:
-- Parse ESP keys from getconfig
-- Implement ESP encapsulation
-- UDP transport instead of TLS
-
-### IPv6 Support
-- TUN device supports IPv6
-- Routing not tested
-- DNS handling not tested
+### ESP Mode (IPsec/UDP)
+Faster than SSL tunnel, but more complex to implement.
 
 ---
 
-*Last updated: 2026-01-03*
+*Last updated: 2026-01-04*
