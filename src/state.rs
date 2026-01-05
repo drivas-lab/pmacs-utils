@@ -337,10 +337,25 @@ impl AuthToken {
     }
 
     /// Save auth token (called by parent before spawning daemon)
+    /// Uses atomic write (write to temp, then rename) with restrictive permissions
     pub fn save(&self) -> Result<PathBuf, StateError> {
         let path = Self::token_file_path()?;
         let content = serde_json::to_string_pretty(self)?;
-        fs::write(&path, content)?;
+
+        // Write to temp file first for atomic operation
+        let temp_path = path.with_extension("tmp");
+        fs::write(&temp_path, &content)?;
+
+        // Set restrictive permissions (0600) on Unix before rename
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let perms = std::fs::Permissions::from_mode(0o600);
+            fs::set_permissions(&temp_path, perms)?;
+        }
+
+        // Atomic rename
+        fs::rename(&temp_path, &path)?;
         Ok(path)
     }
 
