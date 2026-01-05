@@ -1,6 +1,6 @@
 [package]
 name = "pmacs-vpn"
-version = "0.2.0"
+version = "0.2.1"
 edition = "2021"
 authors = ["PMACS Utils Team"]
 description = "Split-tunnel VPN toolkit for PMACS cluster access"
