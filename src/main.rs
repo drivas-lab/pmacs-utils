@@ -804,7 +804,7 @@ async fn spawn_daemon(
     }
 
     // 4. Get password (from keychain or prompt)
-    let (password, was_cached) = get_vpn_password(&username, forget_password)
+    let (mut password, mut was_cached) = get_vpn_password(&username, forget_password)
         .map_err(|e| e.to_string())?;
 
     // 5. Do auth flow
@@ -814,20 +814,38 @@ async fn spawn_daemon(
 
     // Get DUO method from config
     let duo_method = &config.preferences.duo_method;
-    let duo_passcode = if *duo_method == pmacs_vpn::DuoMethod::Passcode {
-        // Prompt for passcode
-        let code = rpassword::prompt_password("DUO passcode: ")?;
-        Some(code)
-    } else {
-        None
-    };
 
-    println!("Logging in ({})...", duo_method.description());
-    if *duo_method == pmacs_vpn::DuoMethod::Push {
-        notifications::notify_duo_push();
-    }
-    let duo_str = duo_passcode.as_deref().or_else(|| duo_method.as_auth_str());
-    let login = gp::auth::login(&config.vpn.gateway, &username, &password, duo_str).await?;
+    // Login loop with password retry on auth failure
+    let login = loop {
+        let duo_passcode = if *duo_method == pmacs_vpn::DuoMethod::Passcode {
+            let code = rpassword::prompt_password("DUO passcode: ")?;
+            Some(code)
+        } else {
+            None
+        };
+
+        println!("Logging in ({})...", duo_method.description());
+        if *duo_method == pmacs_vpn::DuoMethod::Push {
+            notifications::notify_duo_push();
+        }
+        let duo_str = duo_passcode.as_deref().or_else(|| duo_method.as_auth_str());
+
+        match gp::auth::login(&config.vpn.gateway, &username, &password, duo_str).await {
+            Ok(login) => break login,
+            Err(gp::AuthError::AuthFailed(msg)) => {
+                eprintln!("Login failed: {}", msg);
+                if was_cached {
+                    eprintln!("(Saved password may be stale)");
+                }
+                eprintln!();
+                let prompt = format!("Password for {}: ", username);
+                password = rpassword::prompt_password(&prompt)?;
+                was_cached = false;
+                continue;
+            }
+            Err(e) => return Err(e.into()),
+        }
+    };
     println!("Login successful!");
 
     // 6. Save password if requested or offer to save
@@ -1066,7 +1084,7 @@ async fn connect_vpn(user: Option<String>, save_password: bool, forget_password:
     }
 
     // 4. Get password (from keychain or prompt)
-    let (password, was_cached) = get_vpn_password(&username, forget_password)?;
+    let (mut password, mut was_cached) = get_vpn_password(&username, forget_password)?;
 
     // 5. Auth flow
     println!("Authenticating...");
@@ -1075,20 +1093,38 @@ async fn connect_vpn(user: Option<String>, save_password: bool, forget_password:
 
     // Get DUO method from config
     let duo_method = &config.preferences.duo_method;
-    let duo_passcode = if *duo_method == pmacs_vpn::DuoMethod::Passcode {
-        // Prompt for passcode
-        let code = rpassword::prompt_password("DUO passcode: ")?;
-        Some(code)
-    } else {
-        None
-    };
 
-    println!("Logging in ({})...", duo_method.description());
-    if *duo_method == pmacs_vpn::DuoMethod::Push {
-        notifications::notify_duo_push();
-    }
-    let duo_str = duo_passcode.as_deref().or_else(|| duo_method.as_auth_str());
-    let login = gp::auth::login(&config.vpn.gateway, &username, &password, duo_str).await?;
+    // Login loop with password retry on auth failure
+    let login = loop {
+        let duo_passcode = if *duo_method == pmacs_vpn::DuoMethod::Passcode {
+            let code = rpassword::prompt_password("DUO passcode: ")?;
+            Some(code)
+        } else {
+            None
+        };
+
+        println!("Logging in ({})...", duo_method.description());
+        if *duo_method == pmacs_vpn::DuoMethod::Push {
+            notifications::notify_duo_push();
+        }
+        let duo_str = duo_passcode.as_deref().or_else(|| duo_method.as_auth_str());
+
+        match gp::auth::login(&config.vpn.gateway, &username, &password, duo_str).await {
+            Ok(login) => break login,
+            Err(gp::AuthError::AuthFailed(msg)) => {
+                eprintln!("Login failed: {}", msg);
+                if was_cached {
+                    eprintln!("(Saved password may be stale)");
+                }
+                eprintln!();
+                let prompt = format!("Password for {}: ", username);
+                password = rpassword::prompt_password(&prompt)?;
+                was_cached = false;
+                continue;
+            }
+            Err(e) => return Err(e.into()),
+        }
+    };
     println!("Login successful!");
 
     // 6. Save password if requested or offer to save
