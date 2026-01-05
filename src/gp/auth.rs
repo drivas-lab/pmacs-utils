@@ -158,7 +158,7 @@ pub async fn prelogin(gateway: &str) -> Result<PreloginResponse, AuthError> {
         .await?;
 
     let body = response.text().await?;
-    debug!("Prelogin response: {}", body);
+    debug!("Prelogin response received ({} bytes)", body.len());
 
     let prelogin: PreloginXml = quick_xml::de::from_str(&body)?;
 
@@ -331,7 +331,7 @@ pub async fn login(
     password: &str,
     passcode: Option<&str>,
 ) -> Result<LoginResponse, AuthError> {
-    info!("Logging in as {} (passcode: {})", username, passcode.unwrap_or("none"));
+    info!("Logging in as {} (passcode: {})", username, if passcode.is_some() { "provided" } else { "none" });
 
     let client = Client::builder()
         .danger_accept_invalid_certs(false)
@@ -373,7 +373,7 @@ pub async fn login(
         .await?;
 
     let body = response.text().await?;
-    debug!("Login response: {}", body);
+    debug!("Login response received ({} bytes)", body.len());
 
     // Check if this is a challenge response (MFA required)
     if let Some(challenge) = parse_challenge(&body) {
@@ -411,10 +411,9 @@ pub async fn login(
             .await?;
 
         debug!("MFA response status: {}", challenge_response.status());
-        debug!("MFA response headers: {:?}", challenge_response.headers());
 
         let challenge_body = challenge_response.text().await?;
-        debug!("MFA response body: {}", challenge_body);
+        debug!("MFA response received ({} bytes)", challenge_body.len());
 
         // Check for error response
         if challenge_body.contains("respStatus = \"Error\"") {
@@ -557,7 +556,7 @@ async fn getconfig_impl(
         .await?;
 
     let body = response.text().await?;
-    debug!("Getconfig response: {}", body);
+    debug!("Getconfig response received ({} bytes)", body.len());
 
     let policy: PolicyXml = quick_xml::de::from_str(&body)
         .map_err(|e| AuthError::AuthFailed(format!("Invalid getconfig response: {}", e)))?;

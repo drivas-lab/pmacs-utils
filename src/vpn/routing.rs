@@ -296,32 +296,57 @@ fn query_dns_server(
     let mut pos = 12;
 
     // Skip question name (look for 0x00 terminator or pointer)
-    while pos < len && response[pos] != 0 {
-        if response[pos] & 0xC0 == 0xC0 {
+    while pos < len {
+        let byte = response[pos];
+        if byte == 0 {
+            pos += 1; // Skip null terminator
+            break;
+        } else if byte & 0xC0 == 0xC0 {
             // Pointer, skip 2 bytes
+            if pos + 1 >= len {
+                return Err("truncated pointer in question".to_string());
+            }
             pos += 2;
             break;
+        } else {
+            // Label: skip length byte + label bytes
+            let label_len = byte as usize;
+            if pos + 1 + label_len > len {
+                return Err("truncated label in question".to_string());
+            }
+            pos += 1 + label_len;
         }
-        pos += 1 + response[pos] as usize;
     }
-    if response[pos] == 0 {
-        pos += 1; // Skip null terminator
+
+    // Skip QTYPE (2) and QCLASS (2)
+    if pos + 4 > len {
+        return Err("question section truncated".to_string());
     }
-    pos += 4; // Skip QTYPE and QCLASS
+    pos += 4;
 
     // Parse first answer
     // Skip answer name (might be pointer)
     while pos < len {
-        if response[pos] & 0xC0 == 0xC0 {
-            pos += 2;
-            break;
-        } else if response[pos] == 0 {
+        let byte = response[pos];
+        if byte == 0 {
             pos += 1;
             break;
+        } else if byte & 0xC0 == 0xC0 {
+            if pos + 1 >= len {
+                return Err("truncated pointer in answer".to_string());
+            }
+            pos += 2;
+            break;
+        } else {
+            let label_len = byte as usize;
+            if pos + 1 + label_len > len {
+                return Err("truncated label in answer".to_string());
+            }
+            pos += 1 + label_len;
         }
-        pos += 1 + response[pos] as usize;
     }
 
+    // Need at least 10 bytes for TYPE(2) + CLASS(2) + TTL(4) + RDLENGTH(2)
     if pos + 10 > len {
         return Err("answer section truncated".to_string());
     }
@@ -338,7 +363,10 @@ fn query_dns_server(
     pos += 2;
 
     // If TYPE is A (1) and RDLENGTH is 4, parse IPv4 address
-    if atype == 1 && rdlength == 4 && pos + 4 <= len {
+    if atype == 1 && rdlength == 4 {
+        if pos + 4 > len {
+            return Err("A record data truncated".to_string());
+        }
         let ip = Ipv4Addr::new(
             response[pos],
             response[pos + 1],
@@ -503,6 +531,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore] // Requires network access; run with: cargo test -- --ignored
     fn test_resolve_with_public_dns() {
         // Test with Google's public DNS (8.8.8.8) for a well-known domain
         // This test requires network access

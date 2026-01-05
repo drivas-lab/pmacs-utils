@@ -10,6 +10,8 @@ pub enum ConfigError {
     ReadError(#[from] std::io::Error),
     #[error("Failed to parse config: {0}")]
     ParseError(#[from] toml::de::Error),
+    #[error("Failed to serialize config: {0}")]
+    SerializeError(#[from] toml::ser::Error),
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
@@ -117,7 +119,7 @@ impl Config {
     }
 
     pub fn save(&self, path: &PathBuf) -> Result<(), ConfigError> {
-        let content = toml::to_string_pretty(self).expect("Failed to serialize config");
+        let content = toml::to_string_pretty(self)?;
         std::fs::write(path, content)?;
         Ok(())
     }
