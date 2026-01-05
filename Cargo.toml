@@ -1,0 +1,72 @@
+[package]
+name = "pmacs-vpn"
+version = "0.2.0"
+edition = "2021"
+authors = ["PMACS Utils Team"]
+description = "Split-tunnel VPN toolkit for PMACS cluster access"
+
+[dependencies]
+clap = { version = "4", features = ["derive"] }
+tokio = { version = "1", features = ["full"] }
+trust-dns-resolver = "0.23"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+toml = "0.8"
+thiserror = "1"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# HTTP client for GlobalProtect auth
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls-webpki-roots", "cookies"] }
+
+# XML parsing for GlobalProtect responses
+quick-xml = { version = "0.37", features = ["serialize"] }
+
+# TUN device (cross-platform, async for non-blocking I/O)
+tun = { version = "0.8", features = ["async"] }
+
+# TLS for SSL tunnel
+tokio-rustls = { version = "0.26", default-features = false, features = ["ring"] }
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
+webpki-roots = "0.26"
+
+# Hostname
+hostname = "0.4"
+
+# Password input
+rpassword = "7"
+
+# Ctrl+C handling
+ctrlc = "3.4"
+
+# Secure credential storage (Windows Credential Manager, macOS Keychain, Linux Secret Service)
+keyring = { version = "3", features = ["windows-native", "apple-native", "linux-native"] }
+
+# Home directory detection
+dirs = "5"
+
+# System tray support
+tray-icon = "0.21"
+tao = "0.30"
+image = "0.25"
+
+[target.'cfg(unix)'.dependencies]
+nix = { version = "0.29", features = ["net", "process", "user", "fs", "signal"] }
+
+[target.'cfg(windows)'.dependencies]
+windows = { version = "0.58", features = ["Win32_NetworkManagement_IpHelper", "Win32_Networking_WinSock", "Win32_System_Registry", "Win32_System_Threading", "Win32_Foundation"] }
+winrt-notification = "0.5"
+
+[target.'cfg(not(windows))'.dependencies]
+notify-rust = "4"
+
+[dev-dependencies]
+tempfile = "3"
+
+[[bin]]
+name = "pmacs-vpn"
+path = "src/main.rs"
+
+[profile.release]
+lto = true
+strip = true

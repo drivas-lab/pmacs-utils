@@ -1,0 +1,49 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>CFBundleName</key>
+    <string>PMACS VPN</string>
+
+    <key>CFBundleDisplayName</key>
+    <string>PMACS VPN</string>
+
+    <key>CFBundleIdentifier</key>
+    <string>edu.upenn.pmacs.vpn</string>
+
+    <key>CFBundleVersion</key>
+    <string>0.1.0</string>
+
+    <key>CFBundleShortVersionString</key>
+    <string>0.1.0</string>
+
+    <key>CFBundleExecutable</key>
+    <string>pmacs-vpn</string>
+
+    <key>CFBundleIconFile</key>
+    <string>AppIcon</string>
+
+    <key>CFBundlePackageType</key>
+    <string>APPL</string>
+
+    <!-- Hide from Dock, show only in menu bar -->
+    <key>LSUIElement</key>
+    <true/>
+
+    <!-- Minimum macOS version -->
+    <key>LSMinimumSystemVersion</key>
+    <string>10.13</string>
+
+    <!-- High-resolution support -->
+    <key>NSHighResolutionCapable</key>
+    <true/>
+
+    <!-- Required for osascript administrator privileges -->
+    <key>NSAppleEventsUsageDescription</key>
+    <string>PMACS VPN needs to run commands with administrator privileges to manage network routing.</string>
+
+    <!-- Supports Retina displays -->
+    <key>NSPrincipalClass</key>
+    <string>NSApplication</string>
+</dict>
+</plist>
