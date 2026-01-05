@@ -3,7 +3,7 @@
 Split-tunnel VPN utility for PMACS.
 
 The official GlobalProtect VPN routes all of your traffic through PMACS.
-This slow downs everything, blocks access to Gmail, and is generally creepy.
+This slows down everything, blocks access to Gmail, and is generally creepy.
 
 This is a lightweight alternative that keeps your non-PMACS traffic private.
 Written in Rust and pure spite.
@@ -69,7 +69,7 @@ ssh-copy-id prometheus.pmacs.upenn.edu
 | **Watches all your traffic** | No | Yes |
 
 GlobalProtect runs three background processes 24/7 eating 73 MB of RAM even when you're not using it.
-When connected, it balloons to 230 MB and routes *everything* through Penn Medicine's network—your
+When connected, it balloons to 230 MB and routes *everything* through Penn Medicine's network; your
 email, your Spotify, your Google searches. All of it.
 
 pmacs-vpn connects only when you need it, routes only PMACS hosts through the tunnel, and exits
