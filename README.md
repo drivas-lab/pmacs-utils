@@ -8,6 +8,24 @@ This slow downs everything, blocks access to Gmail, and is generally creepy.
 This is a lightweight alternative that keeps your non-PMACS traffic private.
 Written in Rust and pure spite.
 
+## Why not just use GlobalProtect?
+
+| | pmacs-vpn | GlobalProtect |
+|---|-----------|---------------|
+| **Memory (connected)** | 12 MB | 230 MB |
+| **Memory (idle)** | 0 MB | 73 MB |
+| **Install size** | 5 MB | 162 MB |
+| **Background processes** | None | 2-3 (always) |
+| **Blocks Gmail** | No | Yes |
+| **Watches all your traffic** | No | Yes |
+
+GlobalProtect runs three background processes 24/7 eating 73 MB of RAM even when you're not using it.
+When connected, it balloons to 230 MB and routes *everything* through Penn Medicine's network—your
+email, your Spotify, your Google searches. All of it.
+
+pmacs-vpn connects only when you need it, routes only PMACS hosts through the tunnel, and exits
+cleanly when you're done. Your other traffic stays between you and your ISP.
+
 ## macOS
 
 ```bash
