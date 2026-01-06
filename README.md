@@ -90,7 +90,3 @@ pmacs-vpn connect
 ```cmd
 pmacs-vpn tray
 ```
-
----
-
-Note: If anyone has an Apple developer account and is willing to help with CodeSign, please contact yunjun.kang@pennmedicine.upenn.edu
