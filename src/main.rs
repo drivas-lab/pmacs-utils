@@ -5,6 +5,8 @@ use pmacs_vpn::vpn::hosts::HostsManager;
 use pmacs_vpn::AuthToken;
 use pmacs_vpn::notifications;
 use std::sync::Mutex;
+#[cfg(unix)]
+use tokio::signal::unix::{signal, SignalKind};
 use tracing::{error, info, warn, Level};
 use tracing_subscriber::FmtSubscriber;
 
@@ -1279,18 +1281,54 @@ async fn connect_vpn(user: Option<String>, save_password: bool, forget_password:
         }
     }
 
-    // 13. Wait for tunnel completion or Ctrl+C
-    let result = tokio::select! {
-        result = tunnel_handle => {
-            match result {
-                Ok(Ok(())) => Ok(()),
-                Ok(Err(e)) => Err(Box::new(e) as Box<dyn std::error::Error>),
-                Err(e) => Err(Box::new(e) as Box<dyn std::error::Error>),
+    // 13. Wait for tunnel completion or shutdown signal
+    let result = {
+        #[cfg(unix)]
+        {
+            let mut sigterm = signal(SignalKind::terminate())?;
+            let mut sighup = signal(SignalKind::hangup())?;
+
+            tokio::select! {
+                result = tunnel_handle => {
+                    match result {
+                        Ok(Ok(())) => Ok(()),
+                        Ok(Err(e)) => Err(Box::new(e) as Box<dyn std::error::Error>),
+                        Err(e) => Err(Box::new(e) as Box<dyn std::error::Error>),
+                    }
+                }
+                _ = tokio::signal::ctrl_c() => {
+                    info!("Received interrupt signal");
+                    println!("\nDisconnecting...");
+                    Ok(())
+                }
+                _ = sigterm.recv() => {
+                    info!("Received SIGTERM");
+                    println!("\nDisconnecting...");
+                    Ok(())
+                }
+                _ = sighup.recv() => {
+                    info!("Received SIGHUP");
+                    println!("\nDisconnecting...");
+                    Ok(())
+                }
             }
         }
-        _ = tokio::signal::ctrl_c() => {
-            println!("\nDisconnecting...");
-            Ok(())
+        #[cfg(not(unix))]
+        {
+            tokio::select! {
+                result = tunnel_handle => {
+                    match result {
+                        Ok(Ok(())) => Ok(()),
+                        Ok(Err(e)) => Err(Box::new(e) as Box<dyn std::error::Error>),
+                        Err(e) => Err(Box::new(e) as Box<dyn std::error::Error>),
+                    }
+                }
+                _ = tokio::signal::ctrl_c() => {
+                    info!("Received interrupt signal");
+                    println!("\nDisconnecting...");
+                    Ok(())
+                }
+            }
         }
     };
 
@@ -1389,18 +1427,50 @@ async fn connect_vpn_with_token(token: AuthToken) -> Result<(), Box<dyn std::err
 
     info!("Daemon: VPN ready");
 
-    // Wait for tunnel completion or signal
-    let result = tokio::select! {
-        result = tunnel_handle => {
-            match result {
-                Ok(Ok(())) => Ok(()),
-                Ok(Err(e)) => Err(Box::new(e) as Box<dyn std::error::Error>),
-                Err(e) => Err(Box::new(e) as Box<dyn std::error::Error>),
+    // Wait for tunnel completion or shutdown signal
+    let result = {
+        #[cfg(unix)]
+        {
+            let mut sigterm = signal(SignalKind::terminate())?;
+            let mut sighup = signal(SignalKind::hangup())?;
+
+            tokio::select! {
+                result = tunnel_handle => {
+                    match result {
+                        Ok(Ok(())) => Ok(()),
+                        Ok(Err(e)) => Err(Box::new(e) as Box<dyn std::error::Error>),
+                        Err(e) => Err(Box::new(e) as Box<dyn std::error::Error>),
+                    }
+                }
+                _ = tokio::signal::ctrl_c() => {
+                    info!("Daemon: received shutdown signal");
+                    Ok(())
+                }
+                _ = sigterm.recv() => {
+                    info!("Daemon: received SIGTERM");
+                    Ok(())
+                }
+                _ = sighup.recv() => {
+                    info!("Daemon: received SIGHUP");
+                    Ok(())
+                }
             }
         }
-        _ = tokio::signal::ctrl_c() => {
-            info!("Daemon: received shutdown signal");
-            Ok(())
+        #[cfg(not(unix))]
+        {
+            tokio::select! {
+                result = tunnel_handle => {
+                    match result {
+                        Ok(Ok(())) => Ok(()),
+                        Ok(Err(e)) => Err(Box::new(e) as Box<dyn std::error::Error>),
+                        Err(e) => Err(Box::new(e) as Box<dyn std::error::Error>),
+                    }
+                }
+                _ = tokio::signal::ctrl_c() => {
+                    info!("Daemon: received shutdown signal");
+                    Ok(())
+                }
+            }
         }
     };
 
