@@ -394,15 +394,14 @@ fn bind_socket_to_interface(socket: &UdpSocket, interface_index: u32) -> Result<
 
     let raw_socket = socket.as_raw_socket();
 
-    // The interface index needs to be in network byte order (big endian)
-    let if_index_be = interface_index.to_be();
-
+    // IP_UNICAST_IF requires interface index in network byte order (big-endian)
+    // See: https://learn.microsoft.com/en-us/windows/win32/winsock/ipproto-ip-socket-options
     let result = unsafe {
         windows::Win32::Networking::WinSock::setsockopt(
             windows::Win32::Networking::WinSock::SOCKET(raw_socket as usize),
             IPPROTO_IP,
             IP_UNICAST_IF,
-            Some(&if_index_be.to_ne_bytes()),
+            Some(&interface_index.to_be_bytes()),
         )
     };
 
