@@ -1,7 +1,7 @@
 //! Cross-platform notifications for VPN status updates
 
 #[cfg(windows)]
-use winrt_notification::{Duration, Sound, Toast};
+use tauri_winrt_notification::{Duration, Sound, Toast};
 
 #[cfg(not(windows))]
 use notify_rust::Notification;
