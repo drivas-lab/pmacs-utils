@@ -72,13 +72,8 @@ enum Commands {
 /// Check if running with admin privileges (Windows)
 #[cfg(windows)]
 fn is_admin() -> bool {
-    use std::process::Command;
-    // Quick check using net session (requires admin)
-    Command::new("net")
-        .args(["session"])
-        .output()
-        .map(|o| o.status.success())
-        .unwrap_or(false)
+    use windows::Win32::UI::Shell::IsUserAnAdmin;
+    unsafe { IsUserAnAdmin().as_bool() }
 }
 
 /// Check if running with root privileges (Unix)
