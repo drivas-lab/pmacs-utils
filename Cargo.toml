@@ -8,7 +8,6 @@ description = "Split-tunnel VPN toolkit for PMACS cluster access"
 [dependencies]
 clap = { version = "4", features = ["derive"] }
 tokio = { version = "1", features = ["full"] }
-trust-dns-resolver = "0.23"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 toml = "0.8"

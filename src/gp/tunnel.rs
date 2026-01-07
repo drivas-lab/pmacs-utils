@@ -253,7 +253,11 @@ impl SslTunnel {
 
         // Pre-allocate buffers outside the loop to avoid repeated allocation
         let mut tun_buf = vec![0u8; mtu + 128];
-        let mut net_header = [0u8; 16];
+
+        // Persistent header buffer for cancel-safe reads
+        // (read_exact in select! is not cancel-safe - partial reads would be lost)
+        let mut header_buf = [0u8; 16];
+        let mut header_pos = 0usize;
 
         loop {
             tokio::select! {
@@ -277,14 +281,29 @@ impl SslTunnel {
 
                 // Priority 2: Inbound traffic (Gateway → TUN)
                 // Packets from VPN network destined for local applications
-                result = self.stream.read_exact(&mut net_header) => {
+                // Uses cancel-safe incremental read (not read_exact) to avoid losing
+                // partial data if another select! branch wins mid-read
+                result = self.stream.read(&mut header_buf[header_pos..]) => {
                     match result {
-                        Ok(_) => {
+                        Ok(0) => {
+                            info!("Tunnel disconnected (EOF)");
+                            return Err(TunnelError::Disconnected);
+                        }
+                        Ok(n) => {
                             // Any data from gateway = connection is alive
                             self.last_inbound = Instant::now();
+                            header_pos += n;
+
+                            // Wait until we have the full 16-byte header
+                            if header_pos < 16 {
+                                continue;
+                            }
+
+                            // Full header received, reset for next packet
+                            header_pos = 0;
 
                             // Parse length from header
-                            let len = u16::from_be_bytes([net_header[6], net_header[7]]) as usize;
+                            let len = u16::from_be_bytes([header_buf[6], header_buf[7]]) as usize;
 
                             if len == 0 {
                                 // Keepalive packet from gateway
@@ -292,13 +311,13 @@ impl SslTunnel {
                                 continue;
                             }
 
-                            // Read the payload
+                            // Read the payload (committed read - not in select!)
                             let mut payload = vec![0u8; len];
                             self.stream.read_exact(&mut payload).await?;
 
                             // Decode the full frame
                             let mut frame = Vec::with_capacity(16 + len);
-                            frame.extend_from_slice(&net_header);
+                            frame.extend_from_slice(&header_buf);
                             frame.extend_from_slice(&payload);
 
                             let packet = GpPacket::decode(&frame)?;
