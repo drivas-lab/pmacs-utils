@@ -38,12 +38,16 @@ pub enum TunnelError {
     #[error("Tunnel disconnected")]
     Disconnected,
 
+    #[error("Connection timeout (no data received)")]
+    Timeout,
+
     #[error("Session expired")]
     SessionExpired,
 }
 
 const KEEPALIVE_INTERVAL_SECS: u64 = 30;
 const AGGRESSIVE_KEEPALIVE_SECS: u64 = 10;
+const INBOUND_TIMEOUT_SECS: u64 = 90; // 3x keepalive - no data = dead connection
 const SESSION_LIFETIME_SECS: u64 = 16 * 60 * 60; // 16 hours
 const SESSION_WARNING_SECS: u64 = 15 * 60 * 60;  // Warn at 15 hours
 
@@ -53,6 +57,7 @@ pub struct SslTunnel {
     tun: TunDevice,
     keepalive_interval: Duration,
     session_start: Instant,
+    last_inbound: Instant,
     last_warning_hour: u64,
 }
 
@@ -112,11 +117,13 @@ impl SslTunnel {
             KEEPALIVE_INTERVAL_SECS
         };
 
+        let now = Instant::now();
         let mut tunnel = Self {
             stream,
             tun,
             keepalive_interval: Duration::from_secs(keepalive_secs),
-            session_start: Instant::now(),
+            session_start: now,
+            last_inbound: now,
             last_warning_hour: 0,
         };
 
@@ -240,6 +247,10 @@ impl SslTunnel {
         let mut session_check = interval(Duration::from_secs(300));
         session_check.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
+        // Inbound timeout check (every 10 seconds)
+        let mut timeout_check = interval(Duration::from_secs(10));
+        timeout_check.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+
         // Pre-allocate buffers outside the loop to avoid repeated allocation
         let mut tun_buf = vec![0u8; mtu + 128];
         let mut net_header = [0u8; 16];
@@ -269,6 +280,9 @@ impl SslTunnel {
                 result = self.stream.read_exact(&mut net_header) => {
                     match result {
                         Ok(_) => {
+                            // Any data from gateway = connection is alive
+                            self.last_inbound = Instant::now();
+
                             // Parse length from header
                             let len = u16::from_be_bytes([net_header[6], net_header[7]]) as usize;
 
@@ -321,6 +335,18 @@ impl SslTunnel {
                 // Priority 4: Session expiry check
                 _ = session_check.tick() => {
                     self.check_session_expiry()?;
+                }
+
+                // Priority 5: Inbound timeout check
+                _ = timeout_check.tick() => {
+                    let elapsed = self.last_inbound.elapsed().as_secs();
+                    if elapsed >= INBOUND_TIMEOUT_SECS {
+                        error!(
+                            "No data from gateway in {}s (timeout: {}s)",
+                            elapsed, INBOUND_TIMEOUT_SECS
+                        );
+                        return Err(TunnelError::Timeout);
+                    }
                 }
             }
         }
