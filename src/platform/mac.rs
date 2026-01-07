@@ -18,11 +18,21 @@ use super::{PlatformError, RoutingManager};
 use std::process::Command;
 use tracing::{debug, warn};
 
-pub struct MacRoutingManager;
+pub struct MacRoutingManager {
+    interface_name: Option<String>,
+}
 
 impl MacRoutingManager {
     pub fn new() -> Self {
-        Self
+        Self {
+            interface_name: None,
+        }
+    }
+
+    pub fn with_interface(interface_name: String) -> Self {
+        Self {
+            interface_name: Some(interface_name),
+        }
     }
 }
 
@@ -37,14 +47,21 @@ impl RoutingManager for MacRoutingManager {
     ///
     /// # Arguments
     /// * `destination` - IP address to route (e.g., "172.16.38.40")
-    /// * `interface` - Tunnel device name (e.g., "utun9")
-    fn add_route(&self, destination: &str, interface: &str) -> Result<(), PlatformError> {
-        debug!("Adding route: {} via interface {}", destination, interface);
-
-        let output = Command::new("route")
-            .args(["-n", "add", "-host", destination, "-interface", interface])
-            .output()
-            .map_err(|e| PlatformError::AddRouteError(e.to_string()))?;
+    /// * `gateway` - Gateway IP (used only when not bound to an interface)
+    fn add_route(&self, destination: &str, gateway: &str) -> Result<(), PlatformError> {
+        let output = if let Some(ref interface) = self.interface_name {
+            debug!("Adding route: {} via interface {}", destination, interface);
+            Command::new("route")
+                .args(["-n", "add", "-host", destination, "-interface", interface])
+                .output()
+                .map_err(|e| PlatformError::AddRouteError(e.to_string()))?
+        } else {
+            debug!("Adding route: {} via gateway {}", destination, gateway);
+            Command::new("route")
+                .args(["-n", "add", "-host", destination, gateway])
+                .output()
+                .map_err(|e| PlatformError::AddRouteError(e.to_string()))?
+        };
 
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);

@@ -67,16 +67,16 @@ pub fn get_routing_manager_for_interface(
 ) -> Result<Box<dyn RoutingManager>, PlatformError> {
     #[cfg(target_os = "macos")]
     {
-        // TODO: macOS should use -interface flag
-        let _ = interface_name;
-        Ok(Box::new(mac::MacRoutingManager::new()))
+        Ok(Box::new(mac::MacRoutingManager::with_interface(
+            interface_name.to_string(),
+        )))
     }
 
     #[cfg(target_os = "linux")]
     {
-        // TODO: Linux should use dev flag
-        let _ = interface_name;
-        Ok(Box::new(linux::LinuxRoutingManager::new()))
+        Ok(Box::new(linux::LinuxRoutingManager::with_interface(
+            interface_name.to_string(),
+        )))
     }
 
     #[cfg(target_os = "windows")]

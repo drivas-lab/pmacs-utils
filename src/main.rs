@@ -213,22 +213,30 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
         }
         Commands::Status => {
-            if pmacs_vpn::VpnState::is_active() {
+            if !pmacs_vpn::VpnState::is_active() {
+                println!("VPN Status: Not connected");
+            } else {
                 match pmacs_vpn::VpnState::load() {
                     Ok(Some(state)) => {
-                        // Check if daemon is still running
-                        let daemon_status = if let Some(pid) = state.pid {
-                            if state.is_daemon_running() {
-                                format!("Running (PID: {})", pid)
-                            } else {
-                                format!("Stopped (stale PID: {})", pid)
+                        // If we have a daemon PID, treat stale PID as disconnected.
+                        if let Some(pid) = state.pid {
+                            if !state.is_daemon_running() {
+                                println!("VPN Status: Not connected");
+                                println!("  Note: Found stale state (PID {} is not running)", pid);
+                                println!("  Cleanup: Run 'sudo pmacs-vpn disconnect' to remove stale routes/hosts");
+                                return Ok(());
                             }
+                        }
+
+                        // Connected (or foreground state without PID)
+                        let mode = if let Some(pid) = state.pid {
+                            format!("Running (PID: {})", pid)
                         } else {
                             "Foreground".to_string()
                         };
 
                         println!("VPN Status: Connected");
-                        println!("  Mode: {}", daemon_status);
+                        println!("  Mode: {}", mode);
                         println!("  Tunnel: {}", state.tunnel_device);
                         println!("  Gateway: {}", state.gateway);
                         println!("  Connected: {}", state.connected_at);
@@ -241,8 +249,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     Ok(None) => println!("VPN Status: Not connected"),
                     Err(e) => println!("Error reading state: {}", e),
                 }
-            } else {
-                println!("VPN Status: Not connected");
             }
         }
         Commands::Init => {
@@ -1449,4 +1455,3 @@ async fn cleanup_vpn(state: &pmacs_vpn::VpnState) -> Result<(), Box<dyn std::err
 
     Ok(())
 }
-
