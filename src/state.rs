@@ -140,10 +140,17 @@ impl VpnState {
     }
 
     /// Save state to disk
+    /// Uses atomic write (temp file + rename) to prevent corruption on crash
     pub fn save(&self) -> Result<(), StateError> {
         let path = Self::state_file_path()?;
         let content = serde_json::to_string_pretty(self)?;
-        fs::write(&path, content)?;
+
+        // Write to temp file first for atomic operation
+        let temp_path = path.with_extension("tmp");
+        fs::write(&temp_path, &content)?;
+
+        // Atomic rename
+        fs::rename(&temp_path, &path)?;
         Ok(())
     }
 
