@@ -29,6 +29,10 @@ pub enum TrayCommand {
     Connect,
     /// Stop VPN connection
     Disconnect,
+    /// Reconnect: cleanup + fresh connect
+    Reconnect,
+    /// Auto-reconnect triggered by health monitor
+    AutoReconnect { attempt: u32 },
     /// Show status window (future)
     ShowStatus,
     /// Exit the application
@@ -46,6 +50,7 @@ pub enum VpnStatus {
     Connecting,
     Connected { ip: String },
     Disconnecting,
+    Reconnecting { attempt: u32, max_attempts: u32 },
     Error(String),
 }
 
@@ -71,16 +76,18 @@ impl TrayApp {
     /// Returns the app and channels for communication:
     /// - command_rx: Receive commands from tray (connect, disconnect, etc.)
     /// - status_tx: Send VPN status updates to tray
+    /// - command_tx: Clone of command sender for internal use (e.g., health monitor auto-reconnect)
     ///
     /// If `auto_connect` is true, the tray will send a Connect command on startup.
     pub fn new(
         auto_connect: bool,
         save_password: bool,
         duo_method: DuoMethod,
-    ) -> (Self, mpsc::Receiver<TrayCommand>, mpsc::Sender<VpnStatus>) {
+    ) -> (Self, mpsc::Receiver<TrayCommand>, mpsc::Sender<VpnStatus>, mpsc::Sender<TrayCommand>) {
         let (command_tx, command_rx) = mpsc::channel();
         let (status_tx, status_rx) = mpsc::channel();
 
+        let command_tx_clone = command_tx.clone();
         let app = Self {
             command_tx,
             status_rx,
@@ -89,7 +96,7 @@ impl TrayApp {
             duo_method,
         };
 
-        (app, command_rx, status_tx)
+        (app, command_rx, status_tx, command_tx_clone)
     }
 
     /// Run the tray application (blocking)
@@ -124,6 +131,7 @@ impl TrayApp {
         let status_item = MenuItem::new("Status: Disconnected", false, None);
         let connect_item = MenuItem::new("Connect", true, None);
         let disconnect_item = MenuItem::new("Disconnect", false, None);
+        let reconnect_item = MenuItem::new("Reconnect", false, None);
 
         // Preferences menu items
         let save_password_item = CheckMenuItem::new("Stay logged in", true, self.save_password, None);
@@ -148,6 +156,7 @@ impl TrayApp {
         // Store item IDs for event matching
         let connect_id = connect_item.id().clone();
         let disconnect_id = disconnect_item.id().clone();
+        let reconnect_id = reconnect_item.id().clone();
         let save_password_id = save_password_item.id().clone();
         let duo_push_id = duo_push_item.id().clone();
         let duo_sms_id = duo_sms_item.id().clone();
@@ -163,6 +172,7 @@ impl TrayApp {
             &PredefinedMenuItem::separator(),
             &connect_item,
             &disconnect_item,
+            &reconnect_item,
             &PredefinedMenuItem::separator(),
             &save_password_item,
             &duo_submenu,
@@ -222,6 +232,9 @@ impl TrayApp {
                     } else if event.id == disconnect_id {
                         info!("Tray: Disconnect clicked");
                         let _ = command_tx.send(TrayCommand::Disconnect);
+                    } else if event.id == reconnect_id {
+                        info!("Tray: Reconnect clicked");
+                        let _ = command_tx.send(TrayCommand::Reconnect);
                     } else if event.id == save_password_id {
                         info!("Tray: Save Password toggle clicked");
                         let new_state = !save_password_item.is_checked();
@@ -299,26 +312,37 @@ impl TrayApp {
                                 status_item.set_text("Status: Disconnected");
                                 connect_item.set_enabled(true);
                                 disconnect_item.set_enabled(false);
+                                reconnect_item.set_enabled(false);
                             }
                             VpnStatus::Connecting => {
                                 status_item.set_text("Status: Connecting...");
                                 connect_item.set_enabled(false);
                                 disconnect_item.set_enabled(false);
+                                reconnect_item.set_enabled(false);
                             }
                             VpnStatus::Connected { ip } => {
                                 status_item.set_text(format!("Status: Connected ({})", ip));
                                 connect_item.set_enabled(false);
                                 disconnect_item.set_enabled(true);
+                                reconnect_item.set_enabled(true);
                             }
                             VpnStatus::Disconnecting => {
                                 status_item.set_text("Status: Disconnecting...");
                                 connect_item.set_enabled(false);
                                 disconnect_item.set_enabled(false);
+                                reconnect_item.set_enabled(false);
+                            }
+                            VpnStatus::Reconnecting { attempt, max_attempts } => {
+                                status_item.set_text(format!("Status: Reconnecting ({}/{})", attempt, max_attempts));
+                                connect_item.set_enabled(false);
+                                disconnect_item.set_enabled(true);
+                                reconnect_item.set_enabled(false);
                             }
                             VpnStatus::Error(_) => {
                                 status_item.set_text("Status: Error");
                                 connect_item.set_enabled(true);
                                 disconnect_item.set_enabled(false);
+                                reconnect_item.set_enabled(true);
                             }
                         }
 
@@ -415,6 +439,11 @@ fn update_tray_for_status(tray: &TrayIcon, status: &VpnStatus) {
             (create_connected_icon(), tooltip_static)
         }
         VpnStatus::Disconnecting => (create_connecting_icon(), "PMACS VPN - Disconnecting..."),
+        VpnStatus::Reconnecting { attempt, max_attempts } => {
+            let tooltip = format!("PMACS VPN - Reconnecting ({}/{})", attempt, max_attempts);
+            let tooltip_static: &'static str = Box::leak(tooltip.into_boxed_str());
+            (create_connecting_icon(), tooltip_static)
+        }
         VpnStatus::Error(msg) => {
             let tooltip = format!("PMACS VPN - Error: {}", msg);
             let tooltip_static: &'static str = Box::leak(tooltip.into_boxed_str());

@@ -95,3 +95,19 @@ pub fn notify_error(message: &str) {
     let msg = format!("Connection failed: {}", message);
     show_notification("PMACS VPN", &msg);
 }
+
+/// Notify that reconnection is in progress
+pub fn notify_reconnecting(attempt: u32, max_attempts: u32) {
+    let msg = format!("Reconnecting... (attempt {}/{})", attempt, max_attempts);
+    show_notification("PMACS VPN", &msg);
+}
+
+/// Notify that auto-reconnect has failed after max attempts
+pub fn notify_reconnect_failed() {
+    show_notification("PMACS VPN", "Auto-reconnect failed - max attempts reached");
+}
+
+/// Notify unexpected disconnection
+pub fn notify_unexpected_disconnect() {
+    show_notification("PMACS VPN", "VPN disconnected unexpectedly");
+}

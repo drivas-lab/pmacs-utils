@@ -47,7 +47,7 @@ pub enum TunnelError {
 
 const KEEPALIVE_INTERVAL_SECS: u64 = 30;
 const AGGRESSIVE_KEEPALIVE_SECS: u64 = 10;
-const INBOUND_TIMEOUT_SECS: u64 = 90; // 3x keepalive - no data = dead connection
+const DEFAULT_INBOUND_TIMEOUT_SECS: u64 = 45; // Faster dead tunnel detection (was 90s)
 const SESSION_LIFETIME_SECS: u64 = 16 * 60 * 60; // 16 hours
 const SESSION_WARNING_SECS: u64 = 15 * 60 * 60;  // Warn at 15 hours
 
@@ -56,6 +56,7 @@ pub struct SslTunnel {
     stream: tokio_rustls::client::TlsStream<TcpStream>,
     tun: TunDevice,
     keepalive_interval: Duration,
+    inbound_timeout: Duration,
     session_start: Instant,
     last_inbound: Instant,
     last_warning_hour: u64,
@@ -78,19 +79,21 @@ impl SslTunnel {
         auth_cookie: &str,
         config: &TunnelConfig,
     ) -> Result<Self, TunnelError> {
-        Self::connect_with_options(gateway, username, auth_cookie, config, false).await
+        Self::connect_with_options(gateway, username, auth_cookie, config, false, None).await
     }
 
-    /// Connect with configurable keepalive behavior
+    /// Connect with configurable keepalive and timeout behavior
     ///
     /// # Arguments
     /// * `aggressive_keepalive` - Use shorter keepalive interval (10s vs 30s)
+    /// * `inbound_timeout_secs` - Override inbound timeout (None uses default 45s)
     pub async fn connect_with_options(
         gateway: &str,
         username: &str,
         auth_cookie: &str,
         config: &TunnelConfig,
         aggressive_keepalive: bool,
+        inbound_timeout_secs: Option<u64>,
     ) -> Result<Self, TunnelError> {
         info!("Establishing SSL tunnel to {}", gateway);
 
@@ -117,11 +120,15 @@ impl SslTunnel {
             KEEPALIVE_INTERVAL_SECS
         };
 
+        let timeout_secs = inbound_timeout_secs.unwrap_or(DEFAULT_INBOUND_TIMEOUT_SECS);
+        info!("Inbound timeout: {}s", timeout_secs);
+
         let now = Instant::now();
         let mut tunnel = Self {
             stream,
             tun,
             keepalive_interval: Duration::from_secs(keepalive_secs),
+            inbound_timeout: Duration::from_secs(timeout_secs),
             session_start: now,
             last_inbound: now,
             last_warning_hour: 0,
@@ -358,11 +365,11 @@ impl SslTunnel {
 
                 // Priority 5: Inbound timeout check
                 _ = timeout_check.tick() => {
-                    let elapsed = self.last_inbound.elapsed().as_secs();
-                    if elapsed >= INBOUND_TIMEOUT_SECS {
+                    let elapsed = self.last_inbound.elapsed();
+                    if elapsed >= self.inbound_timeout {
                         error!(
                             "No data from gateway in {}s (timeout: {}s)",
-                            elapsed, INBOUND_TIMEOUT_SECS
+                            elapsed.as_secs(), self.inbound_timeout.as_secs()
                         );
                         return Err(TunnelError::Timeout);
                     }

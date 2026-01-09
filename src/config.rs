@@ -63,10 +63,39 @@ pub struct Preferences {
     /// Auto-connect when tray starts (if credentials cached)
     #[serde(default = "default_true")]
     pub auto_connect: bool,
+
+    /// Automatically reconnect when VPN drops unexpectedly
+    #[serde(default = "default_true")]
+    pub auto_reconnect: bool,
+
+    /// Maximum reconnection attempts before giving up
+    #[serde(default = "default_max_reconnect_attempts")]
+    pub max_reconnect_attempts: u32,
+
+    /// Base delay in seconds between reconnection attempts (uses exponential backoff)
+    #[serde(default = "default_reconnect_delay")]
+    pub reconnect_delay_secs: u32,
+
+    /// Inbound data timeout in seconds (default: 45, min: 30)
+    /// Lower values detect dead tunnels faster but may cause false positives
+    #[serde(default = "default_inbound_timeout")]
+    pub inbound_timeout_secs: u32,
 }
 
 fn default_true() -> bool {
     true
+}
+
+fn default_max_reconnect_attempts() -> u32 {
+    3
+}
+
+fn default_reconnect_delay() -> u32 {
+    5
+}
+
+fn default_inbound_timeout() -> u32 {
+    45  // Faster dead tunnel detection (was 90s)
 }
 
 impl Default for Preferences {
@@ -76,6 +105,10 @@ impl Default for Preferences {
             duo_method: DuoMethod::default(),
             start_at_login: false,
             auto_connect: true,
+            auto_reconnect: true,
+            max_reconnect_attempts: 3,
+            reconnect_delay_secs: 5,
+            inbound_timeout_secs: 45,
         }
     }
 }
@@ -218,6 +251,10 @@ mod tests {
         assert_eq!(prefs.duo_method, DuoMethod::Push);
         assert!(!prefs.start_at_login);
         assert!(prefs.auto_connect);
+        assert!(prefs.auto_reconnect);
+        assert_eq!(prefs.max_reconnect_attempts, 3);
+        assert_eq!(prefs.reconnect_delay_secs, 5);
+        assert_eq!(prefs.inbound_timeout_secs, 45);
     }
 
     #[test]
@@ -227,6 +264,10 @@ mod tests {
             duo_method: DuoMethod::Sms,
             start_at_login: true,
             auto_connect: false,
+            auto_reconnect: true,
+            max_reconnect_attempts: 3,
+            reconnect_delay_secs: 5,
+            inbound_timeout_secs: 45,
         };
 
         let toml_str = toml::to_string(&prefs).unwrap();
@@ -250,6 +291,11 @@ mod tests {
         assert_eq!(prefs.duo_method, DuoMethod::Call);
         assert!(prefs.start_at_login);
         assert!(!prefs.auto_connect);
+        // New fields should use defaults
+        assert!(prefs.auto_reconnect);
+        assert_eq!(prefs.max_reconnect_attempts, 3);
+        assert_eq!(prefs.reconnect_delay_secs, 5);
+        assert_eq!(prefs.inbound_timeout_secs, 45);
     }
 
     #[test]
@@ -280,6 +326,10 @@ mod tests {
             duo_method: DuoMethod::Sms,
             start_at_login: false,
             auto_connect: true,
+            auto_reconnect: true,
+            max_reconnect_attempts: 3,
+            reconnect_delay_secs: 5,
+            inbound_timeout_secs: 45,
         };
 
         let toml_str = toml::to_string(&prefs).unwrap();
@@ -331,6 +381,8 @@ protocol = "gp"
         assert_eq!(loaded.preferences.duo_method, DuoMethod::Push);
         assert!(!loaded.preferences.start_at_login);
         assert!(loaded.preferences.auto_connect);
+        assert!(loaded.preferences.auto_reconnect);
+        assert_eq!(loaded.preferences.inbound_timeout_secs, 45);
     }
 
     #[test]
@@ -360,5 +412,7 @@ duo_method = "sms"
         assert!(loaded.preferences.save_password);
         assert!(!loaded.preferences.start_at_login);
         assert!(loaded.preferences.auto_connect);
+        assert!(loaded.preferences.auto_reconnect);
+        assert_eq!(loaded.preferences.inbound_timeout_secs, 45);
     }
 }

@@ -376,10 +376,11 @@ async fn run_tray_mode() {
     }
 
     // Create tray app with auto-connect setting
-    let (app, command_rx, status_tx) = TrayApp::new(auto_connect, save_password, duo_method);
+    let (app, command_rx, status_tx, command_tx) = TrayApp::new(auto_connect, save_password, duo_method);
 
     // Clone for the command handler
     let status_tx_clone = status_tx.clone();
+    let command_tx_health = command_tx.clone();
 
     // Spawn command handler using spawn_blocking since we make blocking calls
     // (std::sync::mpsc::recv, spawn_daemon which does I/O)
@@ -420,7 +421,8 @@ async fn run_tray_mode() {
                     }
 
                     // Spawn daemon (auth happens in parent, passes token to child)
-                    match rt.block_on(spawn_daemon(&None, false, false, false)) {
+                    // Use aggressive keepalive for tray mode (10s instead of 30s)
+                    match rt.block_on(spawn_daemon(&None, false, false, true)) {
                         Ok(pid) => {
                             info!("VPN started in background (PID {})", pid);
 
@@ -512,6 +514,129 @@ async fn run_tray_mode() {
                     }
                     break;
                 }
+                TrayCommand::Reconnect => {
+                    info!("Tray: Received reconnect command");
+                    let _ = status_tx_clone.send(VpnStatus::Connecting);
+
+                    // Kill existing daemon if running
+                    if let Ok(Some(state)) = pmacs_vpn::VpnState::load() {
+                        if state.pid.is_some() && state.is_daemon_running() {
+                            let _ = state.kill_daemon();
+                        }
+                    }
+
+                    // Cleanup routes and hosts
+                    let _ = rt.block_on(disconnect_vpn());
+
+                    // Now connect (same as Connect handler)
+                    let config_path = std::path::PathBuf::from(CONFIG_PATH);
+                    let config = match pmacs_vpn::Config::load(&config_path) {
+                        Ok(c) => c,
+                        Err(e) => {
+                            let _ = status_tx_clone.send(VpnStatus::Error(format!("Config error: {}", e)));
+                            continue;
+                        }
+                    };
+
+                    let username = config.vpn.username.clone().unwrap_or_default();
+                    if username.is_empty() || pmacs_vpn::get_password(&username).is_none() {
+                        let _ = status_tx_clone.send(VpnStatus::Error(
+                            "No cached password. Run 'pmacs-vpn connect --save-password' first.".to_string()
+                        ));
+                        continue;
+                    }
+
+                    // Use aggressive keepalive for tray mode
+                    match rt.block_on(spawn_daemon(&None, false, false, true)) {
+                        Ok(pid) => {
+                            info!("VPN reconnected in background (PID {})", pid);
+                            let mut connected = false;
+                            for _ in 0..60 {
+                                std::thread::sleep(std::time::Duration::from_millis(500));
+                                if let Ok(Some(state)) = pmacs_vpn::VpnState::load() {
+                                    if state.is_daemon_running() {
+                                        notifications::notify_connected();
+                                        let _ = status_tx_clone.send(VpnStatus::Connected {
+                                            ip: state.gateway.to_string(),
+                                        });
+                                        connected = true;
+                                        break;
+                                    }
+                                }
+                            }
+                            if !connected {
+                                let _ = status_tx_clone.send(VpnStatus::Error(
+                                    "Reconnection timeout - check logs".to_string()
+                                ));
+                            }
+                        }
+                        Err(e) => {
+                            error!("Failed to reconnect VPN: {}", e);
+                            let _ = status_tx_clone.send(VpnStatus::Error(format!("Reconnect failed: {}", e)));
+                        }
+                    }
+                }
+                TrayCommand::AutoReconnect { attempt } => {
+                    info!("Tray: Auto-reconnect attempt {}", attempt);
+
+                    // Cleanup stale state
+                    if let Ok(Some(state)) = pmacs_vpn::VpnState::load() {
+                        if state.pid.is_some() {
+                            let _ = state.kill_daemon();
+                        }
+                    }
+                    let _ = rt.block_on(disconnect_vpn());
+
+                    // Check for cached credentials
+                    let config_path = std::path::PathBuf::from(CONFIG_PATH);
+                    let config = match pmacs_vpn::Config::load(&config_path) {
+                        Ok(c) => c,
+                        Err(e) => {
+                            error!("Auto-reconnect failed: config error: {}", e);
+                            let _ = status_tx_clone.send(VpnStatus::Error("Config error".to_string()));
+                            continue;
+                        }
+                    };
+
+                    let username = config.vpn.username.clone().unwrap_or_default();
+                    if username.is_empty() || pmacs_vpn::get_password(&username).is_none() {
+                        error!("Auto-reconnect failed: no cached credentials");
+                        let _ = status_tx_clone.send(VpnStatus::Error(
+                            "Cannot auto-reconnect - no saved credentials".to_string()
+                        ));
+                        continue;
+                    }
+
+                    // Attempt to spawn daemon (aggressive keepalive for tray mode)
+                    match rt.block_on(spawn_daemon(&None, false, false, true)) {
+                        Ok(pid) => {
+                            info!("Auto-reconnect: VPN started (PID {})", pid);
+                            let mut connected = false;
+                            for _ in 0..60 {
+                                std::thread::sleep(std::time::Duration::from_millis(500));
+                                if let Ok(Some(state)) = pmacs_vpn::VpnState::load() {
+                                    if state.is_daemon_running() {
+                                        notifications::notify_connected();
+                                        let _ = status_tx_clone.send(VpnStatus::Connected {
+                                            ip: state.gateway.to_string(),
+                                        });
+                                        connected = true;
+                                        break;
+                                    }
+                                }
+                            }
+                            if !connected {
+                                let _ = status_tx_clone.send(VpnStatus::Error(
+                                    "Auto-reconnect timeout".to_string()
+                                ));
+                            }
+                        }
+                        Err(e) => {
+                            error!("Auto-reconnect failed: {}", e);
+                            let _ = status_tx_clone.send(VpnStatus::Error(format!("Auto-reconnect failed: {}", e)));
+                        }
+                    }
+                }
             }
         }
     });
@@ -525,11 +650,25 @@ async fn run_tray_mode() {
         }
     }
 
-    // Spawn health monitor to detect daemon death (e.g., after sleep/wake)
+    // Spawn health monitor to detect daemon death and trigger auto-reconnect
     let status_tx_health = status_tx.clone();
     let _health_handle = tokio::spawn(async move {
-        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
         static WAS_CONNECTED: AtomicBool = AtomicBool::new(false);
+        static RECONNECT_ATTEMPTS: AtomicU32 = AtomicU32::new(0);
+
+        // Load reconnect settings from config (with defaults)
+        let config_path = std::path::PathBuf::from(CONFIG_PATH);
+        let (auto_reconnect_enabled, max_attempts, base_delay) =
+            if let Ok(config) = pmacs_vpn::Config::load(&config_path) {
+                (
+                    config.preferences.auto_reconnect,
+                    config.preferences.max_reconnect_attempts,
+                    config.preferences.reconnect_delay_secs,
+                )
+            } else {
+                (true, 3, 5) // defaults
+            };
 
         loop {
             tokio::time::sleep(tokio::time::Duration::from_secs(5)).await;
@@ -538,11 +677,44 @@ async fn run_tray_mode() {
                 if state.pid.is_some() {
                     if state.is_daemon_running() {
                         WAS_CONNECTED.store(true, Ordering::Relaxed);
+                        RECONNECT_ATTEMPTS.store(0, Ordering::Relaxed); // Reset on successful connection
                     } else if WAS_CONNECTED.swap(false, Ordering::Relaxed) {
                         // Daemon died unexpectedly (was connected, now dead)
-                        info!("Health monitor: Daemon died unexpectedly");
-                        notifications::notify_error("VPN disconnected unexpectedly");
-                        let _ = status_tx_health.send(VpnStatus::Disconnected);
+                        let current_attempt = RECONNECT_ATTEMPTS.fetch_add(1, Ordering::Relaxed);
+
+                        if auto_reconnect_enabled && current_attempt < max_attempts {
+                            info!(
+                                "Health monitor: Daemon died, attempting reconnect ({}/{})",
+                                current_attempt + 1,
+                                max_attempts
+                            );
+
+                            // Calculate backoff delay: base * 2^attempt (capped at 60s)
+                            let delay = std::cmp::min(base_delay * (1 << current_attempt), 60);
+
+                            notifications::notify_reconnecting(current_attempt + 1, max_attempts);
+                            let _ = status_tx_health.send(VpnStatus::Reconnecting {
+                                attempt: current_attempt + 1,
+                                max_attempts,
+                            });
+
+                            // Wait with backoff before reconnecting
+                            tokio::time::sleep(tokio::time::Duration::from_secs(delay as u64)).await;
+
+                            // Trigger reconnect via command channel
+                            let _ = command_tx_health.send(TrayCommand::AutoReconnect {
+                                attempt: current_attempt + 1,
+                            });
+                        } else {
+                            info!("Health monitor: Daemon died, max reconnect attempts reached or disabled");
+                            if auto_reconnect_enabled {
+                                notifications::notify_reconnect_failed();
+                            } else {
+                                notifications::notify_unexpected_disconnect();
+                            }
+                            let _ = status_tx_health.send(VpnStatus::Disconnected);
+                            RECONNECT_ATTEMPTS.store(0, Ordering::Relaxed);
+                        }
                     }
                 }
             }
@@ -611,7 +783,7 @@ fn run_tray_mode_sync() {
     }
 
     // Create tray app
-    let (app, command_rx, status_tx) = TrayApp::new(auto_connect, save_password, duo_method);
+    let (app, command_rx, status_tx, _command_tx) = TrayApp::new(auto_connect, save_password, duo_method);
 
     // Create tokio runtime for async operations
     let rt = tokio::runtime::Runtime::new().expect("Failed to create tokio runtime");
@@ -704,6 +876,12 @@ fn run_tray_mode_sync() {
                         }
                     }
                     break;
+                }
+                TrayCommand::Reconnect | TrayCommand::AutoReconnect { .. } => {
+                    // macOS tray cannot spawn VPN due to osascript limitations
+                    info!("macOS tray: Directing user to terminal for reconnect");
+                    notifications::notify_error("Use terminal: sudo pmacs-vpn connect");
+                    let _ = status_tx_clone.send(VpnStatus::Disconnected);
                 }
             }
         }
@@ -1165,6 +1343,7 @@ async fn connect_vpn(user: Option<String>, save_password: bool, forget_password:
         &login.auth_cookie,
         &tunnel_config,
         keep_alive,
+        Some(config.preferences.inbound_timeout_secs as u64),
     )
     .await?;
 
@@ -1337,6 +1516,16 @@ async fn connect_vpn(user: Option<String>, save_password: bool, forget_password:
 async fn connect_vpn_with_token(token: AuthToken) -> Result<(), Box<dyn std::error::Error>> {
     info!("Daemon: connecting with auth token...");
 
+    // Load config for timeout settings
+    let config_path = std::path::PathBuf::from(CONFIG_PATH);
+    let inbound_timeout = if config_path.exists() {
+        pmacs_vpn::Config::load(&config_path)
+            .map(|c| c.preferences.inbound_timeout_secs as u64)
+            .unwrap_or(45)
+    } else {
+        45 // default
+    };
+
     // Get tunnel config using the auth cookie
     let tunnel_config = gp::auth::getconfig_with_cookie(
         &token.gateway,
@@ -1358,6 +1547,7 @@ async fn connect_vpn_with_token(token: AuthToken) -> Result<(), Box<dyn std::err
         &token.auth_cookie,
         &tunnel_config,
         token.keep_alive,
+        Some(inbound_timeout),
     )
     .await?;
 
