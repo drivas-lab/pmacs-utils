@@ -90,3 +90,35 @@ pmacs-vpn connect
 ```cmd
 pmacs-vpn tray
 ```
+
+---
+
+## Configuration
+
+Settings are stored in `pmacs-vpn.toml` (created by `pmacs-vpn init`).
+
+```toml
+[vpn]
+gateway = "psomvpn.uphs.upenn.edu"
+protocol = "gp"
+username = "your_pennkey"  # optional, prompts if not set
+
+hosts = ["prometheus.pmacs.upenn.edu"]  # hosts to route through VPN
+
+[preferences]
+save_password = true          # store password in OS keychain
+duo_method = "push"           # push, sms, call, or passcode
+auto_connect = true           # connect automatically when tray starts
+auto_reconnect = true         # reconnect if VPN drops unexpectedly
+max_reconnect_attempts = 3    # give up after N failed reconnects
+reconnect_delay_secs = 5      # base delay between reconnect attempts
+inbound_timeout_secs = 45     # detect dead tunnels (lower = faster detection)
+```
+
+### Tunnel health
+
+The VPN detects dead connections by monitoring inbound traffic. If no data arrives within `inbound_timeout_secs`, the tunnel is considered dead and will auto-reconnect (if enabled).
+
+- **Default:** 45 seconds
+- **Lower values:** Faster detection, but may cause false positives on slow connections
+- **Tray mode:** Uses aggressive keepalive (10s) for faster detection

@@ -12,7 +12,7 @@ pmacs-vpn.toml
 *~
 
 # IDE/tools
-.development tooling/
+
 .idea/
 .vscode/
 
