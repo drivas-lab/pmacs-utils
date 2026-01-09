@@ -230,22 +230,81 @@ pub fn is_start_at_login_enabled() -> bool {
 }
 
 // =============================================================================
-// Linux Implementation (stub)
+// Linux Implementation (XDG autostart)
 // =============================================================================
 
+/// XDG autostart desktop file path
+#[cfg(target_os = "linux")]
+fn autostart_path() -> Option<std::path::PathBuf> {
+    // Use XDG_CONFIG_HOME or fallback to ~/.config
+    let config_dir = std::env::var("XDG_CONFIG_HOME")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|_| {
+            dirs::home_dir()
+                .map(|h| h.join(".config"))
+                .unwrap_or_default()
+        });
+
+    if config_dir.as_os_str().is_empty() {
+        return None;
+    }
+
+    Some(config_dir.join("autostart/pmacs-vpn.desktop"))
+}
+
+/// Enable start at login (Linux)
 #[cfg(target_os = "linux")]
 pub fn enable_start_at_login() -> Result<(), StartupError> {
-    Err(StartupError::Other("Start at login not implemented for Linux".into()))
+    use std::fs;
+
+    let desktop_path = autostart_path()
+        .ok_or_else(|| StartupError::Other("Could not find config directory".into()))?;
+
+    let exe_path = std::env::current_exe()
+        .map_err(|e| StartupError::Other(format!("Could not get executable path: {}", e)))?;
+
+    let desktop_content = format!(
+        r#"[Desktop Entry]
+Type=Application
+Name=PMACS VPN
+Comment=Split-tunnel VPN for PMACS
+Exec={} tray
+Icon=network-vpn
+Terminal=false
+Categories=Network;
+StartupNotify=false
+X-GNOME-Autostart-enabled=true
+"#,
+        exe_path.display()
+    );
+
+    // Create autostart directory if needed
+    if let Some(parent) = desktop_path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+
+    fs::write(&desktop_path, desktop_content)?;
+    tracing::info!("Created XDG autostart: {}", desktop_path.display());
+    Ok(())
 }
 
+/// Disable start at login (Linux)
 #[cfg(target_os = "linux")]
 pub fn disable_start_at_login() -> Result<(), StartupError> {
-    Err(StartupError::Other("Start at login not implemented for Linux".into()))
+    let desktop_path = autostart_path()
+        .ok_or_else(|| StartupError::Other("Could not find config directory".into()))?;
+
+    if desktop_path.exists() {
+        std::fs::remove_file(&desktop_path)?;
+        tracing::info!("Removed XDG autostart: {}", desktop_path.display());
+    }
+    Ok(())
 }
 
+/// Check if start at login is enabled (Linux)
 #[cfg(target_os = "linux")]
 pub fn is_start_at_login_enabled() -> bool {
-    false
+    autostart_path().map(|p| p.exists()).unwrap_or(false)
 }
 
 // =============================================================================
