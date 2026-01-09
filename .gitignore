@@ -20,5 +20,6 @@ pmacs-vpn.toml
 # Added by cargo
 
 /target
+TODO.md
 nul
 .pmacs-vpn/
