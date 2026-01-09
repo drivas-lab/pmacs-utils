@@ -1,9 +1,11 @@
 [package]
 name = "pmacs-vpn"
 version = "0.2.2"
-edition = "2021"
-authors = ["PMACS Utils Team"]
+edition = "2024"
+authors = ["Yunjun Kang <yunjun.kang@pennmedicine.upenn.edu>"]
 description = "Split-tunnel VPN toolkit for PMACS cluster access"
+license = "MIT"
+repository = "https://github.com/DrivasLab/pmacs-utils"
 
 [dependencies]
 clap = { version = "4", features = ["derive"] }
