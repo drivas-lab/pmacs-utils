@@ -4,13 +4,33 @@ use pmacs_vpn::vpn::routing::VpnRouter;
 use pmacs_vpn::vpn::hosts::HostsManager;
 use pmacs_vpn::AuthToken;
 use pmacs_vpn::notifications;
+use std::path::PathBuf;
 use std::sync::Mutex;
 #[cfg(unix)]
 use tokio::signal::unix::{signal, SignalKind};
 use tracing::{error, info, warn, Level};
 use tracing_subscriber::FmtSubscriber;
 
-const CONFIG_PATH: &str = "pmacs-vpn.toml";
+/// Get the config file path (respects XDG_CONFIG_HOME and HOME)
+fn get_config_path() -> PathBuf {
+    // Try XDG_CONFIG_HOME first
+    if let Ok(xdg) = std::env::var("XDG_CONFIG_HOME") {
+        return PathBuf::from(xdg).join("pmacs-vpn").join("config.toml");
+    }
+
+    // Fall back to HOME/.config
+    if let Ok(home) = std::env::var("HOME") {
+        return PathBuf::from(home).join(".config").join("pmacs-vpn").join("config.toml");
+    }
+
+    // Last resort: use dirs crate
+    if let Some(config) = dirs::config_dir() {
+        return config.join("pmacs-vpn").join("config.toml");
+    }
+
+    // Fallback to relative path (shouldn't happen)
+    PathBuf::from("pmacs-vpn.toml")
+}
 
 #[derive(Parser)]
 #[command(name = "pmacs-vpn")]
@@ -251,9 +271,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         Commands::Init => {
             info!("Generating default config...");
             let config = pmacs_vpn::Config::default();
-            let path = std::path::PathBuf::from(CONFIG_PATH);
+            let path = get_config_path();
             config.save(&path)?;
-            println!("Created default config: {}", CONFIG_PATH);
+            println!("Created default config: {}", path.display());
         }
         Commands::ForgetPassword { user } => {
             match pmacs_vpn::delete_password(&user) {
@@ -350,7 +370,7 @@ async fn run_tray_mode() {
     });
 
     // Check if we have config and cached credentials for auto-connect
-    let config_path = std::path::PathBuf::from(CONFIG_PATH);
+    let config_path = get_config_path();
     let (auto_connect, save_password, duo_method) = if config_path.exists() {
         if let Ok(config) = pmacs_vpn::Config::load(&config_path) {
             let has_cached_password = if let Some(ref username) = config.vpn.username {
@@ -393,7 +413,7 @@ async fn run_tray_mode() {
                     let _ = status_tx_clone.send(VpnStatus::Connecting);
 
                     // Check if we have cached credentials
-                    let config_path = std::path::PathBuf::from(CONFIG_PATH);
+                    let config_path = get_config_path();
                     let has_config = config_path.exists();
 
                     if !has_config {
@@ -481,7 +501,7 @@ async fn run_tray_mode() {
                 }
                 TrayCommand::ToggleSavePassword => {
                     info!("Tray: Toggle save password preference");
-                    let config_path = std::path::PathBuf::from(CONFIG_PATH);
+                    let config_path = get_config_path();
                     if let Ok(mut config) = pmacs_vpn::Config::load(&config_path) {
                         config.preferences.save_password = !config.preferences.save_password;
                         if let Err(e) = config.save(&config_path) {
@@ -493,7 +513,7 @@ async fn run_tray_mode() {
                 }
                 TrayCommand::SetDuoMethod(method) => {
                     info!("Tray: Set DUO method to {:?}", method);
-                    let config_path = std::path::PathBuf::from(CONFIG_PATH);
+                    let config_path = get_config_path();
                     if let Ok(mut config) = pmacs_vpn::Config::load(&config_path) {
                         config.preferences.duo_method = method;
                         if let Err(e) = config.save(&config_path) {
@@ -529,7 +549,7 @@ async fn run_tray_mode() {
                     let _ = rt.block_on(disconnect_vpn());
 
                     // Now connect (same as Connect handler)
-                    let config_path = std::path::PathBuf::from(CONFIG_PATH);
+                    let config_path = get_config_path();
                     let config = match pmacs_vpn::Config::load(&config_path) {
                         Ok(c) => c,
                         Err(e) => {
@@ -588,7 +608,7 @@ async fn run_tray_mode() {
                     let _ = rt.block_on(disconnect_vpn());
 
                     // Check for cached credentials
-                    let config_path = std::path::PathBuf::from(CONFIG_PATH);
+                    let config_path = get_config_path();
                     let config = match pmacs_vpn::Config::load(&config_path) {
                         Ok(c) => c,
                         Err(e) => {
@@ -658,7 +678,7 @@ async fn run_tray_mode() {
         static RECONNECT_ATTEMPTS: AtomicU32 = AtomicU32::new(0);
 
         // Load reconnect settings from config (with defaults)
-        let config_path = std::path::PathBuf::from(CONFIG_PATH);
+        let config_path = get_config_path();
         let (auto_reconnect_enabled, max_attempts, base_delay) =
             if let Ok(config) = pmacs_vpn::Config::load(&config_path) {
                 (
@@ -758,7 +778,7 @@ fn run_tray_mode_sync() {
     });
 
     // Check config and credentials
-    let config_path = std::path::PathBuf::from(CONFIG_PATH);
+    let config_path = get_config_path();
     let (auto_connect, save_password, duo_method) = if config_path.exists() {
         if let Ok(config) = pmacs_vpn::Config::load(&config_path) {
             let has_cached_password = if let Some(ref username) = config.vpn.username {
@@ -800,7 +820,7 @@ fn run_tray_mode_sync() {
                     info!("Tray: Received connect command");
                     let _ = status_tx_clone.send(VpnStatus::Connecting);
 
-                    let config_path = std::path::PathBuf::from(CONFIG_PATH);
+                    let config_path = get_config_path();
 
                     // Auto-create config if it doesn't exist
                     let config = if config_path.exists() {
@@ -948,7 +968,7 @@ async fn spawn_daemon(
     }
 
     // 1. Load config (daemon mode requires existing config)
-    let config_path = std::path::PathBuf::from(CONFIG_PATH);
+    let config_path = get_config_path();
     let config = if config_path.exists() {
         match pmacs_vpn::Config::load(&config_path) {
             Ok(config) => config,
@@ -1203,7 +1223,7 @@ async fn connect_vpn(user: Option<String>, save_password: bool, forget_password:
 
     // Normal interactive flow
     // 1. Load or create config interactively
-    let config_path = std::path::PathBuf::from(CONFIG_PATH);
+    let config_path = get_config_path();
     let (config, save_config) = if config_path.exists() {
         match pmacs_vpn::Config::load(&config_path) {
             Ok(config) => (config, false),
@@ -1517,7 +1537,7 @@ async fn connect_vpn_with_token(token: AuthToken) -> Result<(), Box<dyn std::err
     info!("Daemon: connecting with auth token...");
 
     // Load config for timeout settings
-    let config_path = std::path::PathBuf::from(CONFIG_PATH);
+    let config_path = get_config_path();
     let inbound_timeout = if config_path.exists() {
         pmacs_vpn::Config::load(&config_path)
             .map(|c| c.preferences.inbound_timeout_secs as u64)

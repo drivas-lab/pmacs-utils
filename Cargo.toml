@@ -46,6 +46,9 @@ keyring = { version = "3", features = ["windows-native", "apple-native", "linux-
 # Home directory detection
 dirs = "5"
 
+# Base64 encoding for file-based credential storage
+base64 = "0.22"
+
 # System tray support
 tray-icon = "0.21"
 tao = "0.34"
