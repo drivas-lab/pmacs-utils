@@ -331,6 +331,7 @@ impl AuthToken {
     }
 
     /// Create a new auth token with IPC path
+    #[allow(clippy::too_many_arguments)]
     pub fn with_ipc_path(
         gateway: String,
         username: String,
