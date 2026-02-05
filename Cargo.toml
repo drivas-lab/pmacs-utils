@@ -40,6 +40,9 @@ rpassword = "7"
 # Ctrl+C handling
 ctrlc = "3.4"
 
+# IPC for tray-daemon communication (named pipes on Windows, Unix sockets on Linux/macOS)
+interprocess = { version = "2", features = ["tokio"] }
+
 # Secure credential storage (Windows Credential Manager, macOS Keychain, Linux Secret Service)
 keyring = { version = "3", features = ["windows-native", "apple-native", "linux-native"] }
 
