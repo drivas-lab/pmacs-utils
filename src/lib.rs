@@ -16,6 +16,7 @@
 pub mod config;
 pub mod credentials;
 pub mod gp;
+pub mod ipc;
 pub mod launchd;
 pub mod notifications;
 pub mod platform;
