@@ -295,6 +295,9 @@ pub struct AuthToken {
     pub keep_alive: bool,
     /// Created timestamp (for expiry check)
     pub created_at: u64,
+    /// IPC path for tray-daemon communication
+    #[serde(default)]
+    pub ipc_path: Option<String>,
 }
 
 impl AuthToken {
@@ -323,7 +326,32 @@ impl AuthToken {
             hosts,
             keep_alive,
             created_at,
+            ipc_path: None,
         }
+    }
+
+    /// Create a new auth token with IPC path
+    pub fn with_ipc_path(
+        gateway: String,
+        username: String,
+        auth_cookie: String,
+        portal: String,
+        domain: String,
+        hosts: Vec<String>,
+        keep_alive: bool,
+        ipc_path: String,
+    ) -> Self {
+        let mut token = Self::new(
+            gateway,
+            username,
+            auth_cookie,
+            portal,
+            domain,
+            hosts,
+            keep_alive,
+        );
+        token.ipc_path = Some(ipc_path);
+        token
     }
 
     /// Get the auth token file path
