@@ -8,7 +8,7 @@ use std::path::PathBuf;
 use std::sync::Mutex;
 #[cfg(unix)]
 use tokio::signal::unix::{signal, SignalKind};
-use tracing::{error, info, warn, Level};
+use tracing::{debug, error, info, warn, Level};
 use tracing_subscriber::FmtSubscriber;
 
 /// Get the config file path (respects XDG_CONFIG_HOME and HOME)
@@ -477,14 +477,22 @@ async fn run_tray_mode() {
                     info!("Tray: Received disconnect command");
                     let _ = status_tx_clone.send(VpnStatus::Disconnecting);
 
-                    // Kill daemon and cleanup
-                    if let Ok(Some(state)) = pmacs_vpn::VpnState::load() {
-                        if state.pid.is_some() && state.is_daemon_running() {
-                            let _ = state.kill_daemon();
+                    // Try graceful IPC disconnect first, fall back to kill
+                    let ipc_client = pmacs_vpn::ipc::IpcClient::new();
+                    if let Err(e) = rt.block_on(ipc_client.disconnect()) {
+                        info!("IPC disconnect failed ({}), falling back to kill", e);
+                        // Fall back to killing daemon
+                        if let Ok(Some(state)) = pmacs_vpn::VpnState::load() {
+                            if state.pid.is_some() && state.is_daemon_running() {
+                                let _ = state.kill_daemon();
+                            }
                         }
                     }
 
-                    // Cleanup routes and hosts
+                    // Give daemon time to clean up after IPC disconnect
+                    std::thread::sleep(std::time::Duration::from_millis(500));
+
+                    // Cleanup routes and hosts (in case daemon didn't clean up)
                     match rt.block_on(disconnect_vpn()) {
                         Ok(()) => {
                             let _ = status_tx_clone.send(VpnStatus::Disconnected);
@@ -661,19 +669,30 @@ async fn run_tray_mode() {
         }
     });
 
-    // Check initial VPN state
-    if let Ok(Some(state)) = pmacs_vpn::VpnState::load() {
-        if state.is_daemon_running() {
+    // Check initial VPN state via IPC (more reliable than PID check)
+    {
+        let ipc_client = pmacs_vpn::ipc::IpcClient::new();
+        let rt = tokio::runtime::Handle::current();
+        if let Ok(status) = rt.block_on(ipc_client.get_status()) {
             let _ = status_tx.send(VpnStatus::Connected {
-                ip: state.gateway.to_string(),
+                ip: status.gateway,
             });
+        } else if let Ok(Some(state)) = pmacs_vpn::VpnState::load() {
+            // Fall back to PID check for backward compatibility
+            if state.is_daemon_running() {
+                let _ = status_tx.send(VpnStatus::Connected {
+                    ip: state.gateway.to_string(),
+                });
+            }
         }
     }
 
-    // Spawn health monitor to detect daemon death and trigger auto-reconnect
+    // Spawn health monitor to detect daemon death via IPC and trigger auto-reconnect
     let status_tx_health = status_tx.clone();
     let _health_handle = tokio::spawn(async move {
         use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+        use pmacs_vpn::ipc::IpcClient;
+
         static WAS_CONNECTED: AtomicBool = AtomicBool::new(false);
         static RECONNECT_ATTEMPTS: AtomicU32 = AtomicU32::new(0);
 
@@ -690,51 +709,64 @@ async fn run_tray_mode() {
                 (true, 3, 5) // defaults
             };
 
+        let ipc_client = IpcClient::new();
+
         loop {
-            tokio::time::sleep(tokio::time::Duration::from_secs(5)).await;
+            // Poll every 2 seconds (faster than previous 5s for quicker detection)
+            tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
 
-            if let Ok(Some(state)) = pmacs_vpn::VpnState::load() {
-                if state.pid.is_some() {
-                    if state.is_daemon_running() {
-                        WAS_CONNECTED.store(true, Ordering::Relaxed);
-                        RECONNECT_ATTEMPTS.store(0, Ordering::Relaxed); // Reset on successful connection
-                    } else if WAS_CONNECTED.swap(false, Ordering::Relaxed) {
-                        // Daemon died unexpectedly (was connected, now dead)
-                        let current_attempt = RECONNECT_ATTEMPTS.fetch_add(1, Ordering::Relaxed);
+            // Try IPC ping first (more reliable than PID polling)
+            let daemon_alive = ipc_client.ping().await.is_ok();
 
-                        if auto_reconnect_enabled && current_attempt < max_attempts {
-                            info!(
-                                "Health monitor: Daemon died, attempting reconnect ({}/{})",
-                                current_attempt + 1,
-                                max_attempts
-                            );
+            if daemon_alive {
+                // Daemon is responding to IPC
+                WAS_CONNECTED.store(true, Ordering::Relaxed);
+                RECONNECT_ATTEMPTS.store(0, Ordering::Relaxed); // Reset on successful connection
+            } else if WAS_CONNECTED.swap(false, Ordering::Relaxed) {
+                // IPC failed and we were previously connected = daemon died
+                let current_attempt = RECONNECT_ATTEMPTS.fetch_add(1, Ordering::Relaxed);
 
-                            // Calculate backoff delay: base * 2^attempt (capped at 60s)
-                            let delay = std::cmp::min(base_delay * (1 << current_attempt), 60);
+                if auto_reconnect_enabled && current_attempt < max_attempts {
+                    info!(
+                        "Health monitor: IPC failed, daemon dead, attempting reconnect ({}/{})",
+                        current_attempt + 1,
+                        max_attempts
+                    );
 
-                            notifications::notify_reconnecting(current_attempt + 1, max_attempts);
-                            let _ = status_tx_health.send(VpnStatus::Reconnecting {
-                                attempt: current_attempt + 1,
-                                max_attempts,
-                            });
+                    // Calculate backoff delay: base * 2^attempt (capped at 60s)
+                    let delay = std::cmp::min(base_delay * (1 << current_attempt), 60);
 
-                            // Wait with backoff before reconnecting
-                            tokio::time::sleep(tokio::time::Duration::from_secs(delay as u64)).await;
+                    notifications::notify_reconnecting(current_attempt + 1, max_attempts);
+                    let _ = status_tx_health.send(VpnStatus::Reconnecting {
+                        attempt: current_attempt + 1,
+                        max_attempts,
+                    });
 
-                            // Trigger reconnect via command channel
-                            let _ = command_tx_health.send(TrayCommand::AutoReconnect {
-                                attempt: current_attempt + 1,
-                            });
-                        } else {
-                            info!("Health monitor: Daemon died, max reconnect attempts reached or disabled");
-                            if auto_reconnect_enabled {
-                                notifications::notify_reconnect_failed();
-                            } else {
-                                notifications::notify_unexpected_disconnect();
-                            }
-                            let _ = status_tx_health.send(VpnStatus::Disconnected);
-                            RECONNECT_ATTEMPTS.store(0, Ordering::Relaxed);
-                        }
+                    // Wait with backoff before reconnecting
+                    tokio::time::sleep(tokio::time::Duration::from_secs(delay as u64)).await;
+
+                    // Trigger reconnect via command channel
+                    let _ = command_tx_health.send(TrayCommand::AutoReconnect {
+                        attempt: current_attempt + 1,
+                    });
+                } else {
+                    info!("Health monitor: Daemon died, max reconnect attempts reached or disabled");
+                    if auto_reconnect_enabled {
+                        notifications::notify_reconnect_failed();
+                    } else {
+                        notifications::notify_unexpected_disconnect();
+                    }
+                    let _ = status_tx_health.send(VpnStatus::Disconnected);
+                    RECONNECT_ATTEMPTS.store(0, Ordering::Relaxed);
+                }
+            } else {
+                // Not connected yet, check if there's a state file indicating we should be
+                // This handles the case where daemon started but IPC server isn't ready yet
+                if let Ok(Some(state)) = pmacs_vpn::VpnState::load() {
+                    if state.pid.is_some() && state.is_daemon_running() {
+                        // Daemon is running (by PID) but IPC not responding yet
+                        // This is normal during startup, give it time
+                        debug!("Health monitor: Daemon PID exists but IPC not ready");
                     }
                 }
             }
@@ -907,33 +939,45 @@ fn run_tray_mode_sync() {
         }
     });
 
-    // Check initial state
-    if let Ok(Some(state)) = pmacs_vpn::VpnState::load() {
-        if state.is_daemon_running() {
+    // Check initial state via IPC
+    {
+        let ipc_client = pmacs_vpn::ipc::IpcClient::new();
+        if let Ok(status) = rt.block_on(ipc_client.get_status()) {
             let _ = status_tx.send(VpnStatus::Connected {
-                ip: state.gateway.to_string(),
+                ip: status.gateway,
             });
+        } else if let Ok(Some(state)) = pmacs_vpn::VpnState::load() {
+            // Fall back to PID check for backward compatibility
+            if state.is_daemon_running() {
+                let _ = status_tx.send(VpnStatus::Connected {
+                    ip: state.gateway.to_string(),
+                });
+            }
         }
     }
 
-    // Spawn health monitor
+    // Spawn health monitor using IPC
     let status_tx_health = status_tx.clone();
     rt.spawn(async move {
         use std::sync::atomic::{AtomicBool, Ordering};
+        use pmacs_vpn::ipc::IpcClient;
         static WAS_CONNECTED: AtomicBool = AtomicBool::new(false);
 
+        let ipc_client = IpcClient::new();
+
         loop {
-            tokio::time::sleep(tokio::time::Duration::from_secs(5)).await;
-            if let Ok(Some(state)) = pmacs_vpn::VpnState::load() {
-                if state.pid.is_some() {
-                    if state.is_daemon_running() {
-                        WAS_CONNECTED.store(true, Ordering::Relaxed);
-                    } else if WAS_CONNECTED.swap(false, Ordering::Relaxed) {
-                        info!("Health monitor: Daemon died unexpectedly");
-                        notifications::notify_error("VPN disconnected unexpectedly");
-                        let _ = status_tx_health.send(VpnStatus::Disconnected);
-                    }
-                }
+            // Poll every 2 seconds (faster than previous 5s)
+            tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
+
+            // Try IPC ping first (more reliable than PID polling)
+            let daemon_alive = ipc_client.ping().await.is_ok();
+
+            if daemon_alive {
+                WAS_CONNECTED.store(true, Ordering::Relaxed);
+            } else if WAS_CONNECTED.swap(false, Ordering::Relaxed) {
+                info!("Health monitor: IPC failed, daemon died unexpectedly");
+                notifications::notify_error("VPN disconnected unexpectedly");
+                let _ = status_tx_health.send(VpnStatus::Disconnected);
             }
         }
     });
@@ -1069,8 +1113,9 @@ async fn spawn_daemon(
         }
     }
 
-    // 7. Save auth token for daemon
-    let token = AuthToken::new(
+    // 7. Save auth token for daemon (include IPC path)
+    let ipc_path = pmacs_vpn::ipc::ipc_path();
+    let token = AuthToken::with_ipc_path(
         config.vpn.gateway.clone(),
         login.username.clone(),
         login.auth_cookie.clone(),
@@ -1078,6 +1123,7 @@ async fn spawn_daemon(
         login.domain.clone(),
         config.hosts.clone(),
         keep_alive,
+        ipc_path,
     );
     token.save()?;
 
@@ -1534,6 +1580,8 @@ async fn connect_vpn(user: Option<String>, save_password: bool, forget_password:
 
 /// Connect to VPN using pre-authenticated token (daemon child)
 async fn connect_vpn_with_token(token: AuthToken) -> Result<(), Box<dyn std::error::Error>> {
+    use pmacs_vpn::ipc::{cleanup_ipc, DaemonState, IpcServer};
+
     info!("Daemon: connecting with auth token...");
 
     // Load config for timeout settings
@@ -1545,6 +1593,9 @@ async fn connect_vpn_with_token(token: AuthToken) -> Result<(), Box<dyn std::err
     } else {
         45 // default
     };
+
+    // Get IPC path from token (or use default)
+    let ipc_path = token.ipc_path.clone().unwrap_or_else(pmacs_vpn::ipc::ipc_path);
 
     // Get tunnel config using the auth cookie
     let tunnel_config = gp::auth::getconfig_with_cookie(
@@ -1589,8 +1640,8 @@ async fn connect_vpn_with_token(token: AuthToken) -> Result<(), Box<dyn std::err
     tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
 
     // Add routes
-    let router = VpnRouter::with_interface(gateway_ip, tun_name.clone())?;
-    let mut state = pmacs_vpn::VpnState::new(tun_name, internal_ip);
+    let router = VpnRouter::with_interface(gateway_ip.clone(), tun_name.clone())?;
+    let mut state = pmacs_vpn::VpnState::new(tun_name.clone(), internal_ip);
 
     // Route to DNS servers first
     for dns_server in &dns_servers {
@@ -1630,9 +1681,24 @@ async fn connect_vpn_with_token(token: AuthToken) -> Result<(), Box<dyn std::err
     state.set_pid(std::process::id());
     state.save()?;
 
-    info!("Daemon: VPN ready");
+    // Start IPC server for tray communication
+    let daemon_state = DaemonState::new(
+        tun_name,
+        gateway_ip,
+        state.connected_at.clone(),
+    );
+    let (ipc_server, mut ipc_shutdown_rx) = IpcServer::new(ipc_path.clone(), daemon_state);
 
-    // Wait for tunnel completion or shutdown signal
+    // Run IPC server in background
+    let ipc_handle = tokio::spawn(async move {
+        if let Err(e) = ipc_server.run().await {
+            warn!("IPC server error: {}", e);
+        }
+    });
+
+    info!("Daemon: VPN ready, IPC server listening");
+
+    // Wait for tunnel completion, shutdown signal, or IPC disconnect request
     let result = {
         #[cfg(unix)]
         {
@@ -1659,6 +1725,10 @@ async fn connect_vpn_with_token(token: AuthToken) -> Result<(), Box<dyn std::err
                     info!("Daemon: received SIGHUP");
                     Ok(())
                 }
+                _ = ipc_shutdown_rx.recv() => {
+                    info!("Daemon: received IPC disconnect request");
+                    Ok(())
+                }
             }
         }
         #[cfg(not(unix))]
@@ -1675,9 +1745,17 @@ async fn connect_vpn_with_token(token: AuthToken) -> Result<(), Box<dyn std::err
                     info!("Daemon: received shutdown signal");
                     Ok(())
                 }
+                _ = ipc_shutdown_rx.recv() => {
+                    info!("Daemon: received IPC disconnect request");
+                    Ok(())
+                }
             }
         }
     };
+
+    // Stop IPC server
+    ipc_handle.abort();
+    cleanup_ipc(&ipc_path);
 
     // Cleanup
     cleanup_vpn(&state).await?;
