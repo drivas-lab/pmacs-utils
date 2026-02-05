@@ -679,8 +679,7 @@ async fn run_tray_mode() {
     // Check initial VPN state via IPC (more reliable than PID check)
     {
         let ipc_client = pmacs_vpn::ipc::IpcClient::new();
-        let rt = tokio::runtime::Handle::current();
-        if let Ok(status) = rt.block_on(ipc_client.get_status()) {
+        if let Ok(status) = ipc_client.get_status().await {
             let _ = status_tx.send(VpnStatus::Connected {
                 ip: status.gateway,
             });
