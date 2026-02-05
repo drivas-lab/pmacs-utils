@@ -5,11 +5,16 @@ use pmacs_vpn::vpn::hosts::HostsManager;
 use pmacs_vpn::AuthToken;
 use pmacs_vpn::notifications;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
 #[cfg(unix)]
 use tokio::signal::unix::{signal, SignalKind};
 use tracing::{debug, error, info, warn, Level};
 use tracing_subscriber::FmtSubscriber;
+
+/// Global flag to indicate user-initiated disconnect is in progress
+/// This prevents the health monitor from triggering auto-reconnect
+static USER_DISCONNECT_IN_PROGRESS: AtomicBool = AtomicBool::new(false);
 
 /// Get the config file path (respects XDG_CONFIG_HOME and HOME)
 fn get_config_path() -> PathBuf {
@@ -236,14 +241,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 match pmacs_vpn::VpnState::load() {
                     Ok(Some(state)) => {
                         // If we have a daemon PID, treat stale PID as disconnected.
-                        if let Some(pid) = state.pid {
-                            if !state.is_daemon_running() {
+                        if let Some(pid) = state.pid
+                            && !state.is_daemon_running() {
                                 println!("VPN Status: Not connected");
                                 println!("  Note: Found stale state (PID {} is not running)", pid);
                                 println!("  Cleanup: Run 'sudo pmacs-vpn disconnect' to remove stale routes/hosts");
                                 return Ok(());
                             }
-                        }
 
                         // Connected (or foreground state without PID)
                         let mode = if let Some(pid) = state.pid {
@@ -346,11 +350,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 /// Cleanup VPN when tray exits (called on Ctrl+C or normal exit)
 fn cleanup_vpn_on_exit() {
     // Kill daemon if running
-    if let Ok(Some(state)) = pmacs_vpn::VpnState::load() {
-        if state.pid.is_some() && state.is_daemon_running() {
+    if let Ok(Some(state)) = pmacs_vpn::VpnState::load()
+        && state.pid.is_some() && state.is_daemon_running() {
             let _ = state.kill_daemon();
         }
-    }
     // Best-effort route/hosts cleanup (sync version)
     let _ = std::process::Command::new(std::env::current_exe().unwrap())
         .arg("disconnect")
@@ -450,8 +453,8 @@ async fn run_tray_mode() {
                             let mut connected = false;
                             for _ in 0..60 {  // max 30 seconds (DUO + TUN setup can be slow)
                                 std::thread::sleep(std::time::Duration::from_millis(500));
-                                if let Ok(Some(state)) = pmacs_vpn::VpnState::load() {
-                                    if state.is_daemon_running() {
+                                if let Ok(Some(state)) = pmacs_vpn::VpnState::load()
+                                    && state.is_daemon_running() {
                                         notifications::notify_connected();
                                         let _ = status_tx_clone.send(VpnStatus::Connected {
                                             ip: state.gateway.to_string(),
@@ -459,7 +462,6 @@ async fn run_tray_mode() {
                                         connected = true;
                                         break;
                                     }
-                                }
                             }
                             if !connected {
                                 let _ = status_tx_clone.send(VpnStatus::Error(
@@ -475,6 +477,10 @@ async fn run_tray_mode() {
                 }
                 TrayCommand::Disconnect => {
                     info!("Tray: Received disconnect command");
+
+                    // Set flag to prevent health monitor from auto-reconnecting
+                    USER_DISCONNECT_IN_PROGRESS.store(true, Ordering::SeqCst);
+
                     let _ = status_tx_clone.send(VpnStatus::Disconnecting);
 
                     // Try graceful IPC disconnect first, fall back to kill
@@ -482,10 +488,9 @@ async fn run_tray_mode() {
                     if let Err(e) = rt.block_on(ipc_client.disconnect()) {
                         info!("IPC disconnect failed ({}), falling back to kill", e);
                         // Fall back to killing daemon
-                        if let Ok(Some(state)) = pmacs_vpn::VpnState::load() {
-                            if state.pid.is_some() && state.is_daemon_running() {
+                        if let Ok(Some(state)) = pmacs_vpn::VpnState::load()
+                            && state.pid.is_some() && state.is_daemon_running() {
                                 let _ = state.kill_daemon();
-                            }
                         }
                     }
 
@@ -502,6 +507,9 @@ async fn run_tray_mode() {
                             let _ = status_tx_clone.send(VpnStatus::Error(e.to_string()));
                         }
                     }
+
+                    // Clear the flag after disconnect completes
+                    USER_DISCONNECT_IN_PROGRESS.store(false, Ordering::SeqCst);
                 }
                 TrayCommand::ShowStatus => {
                     info!("Tray: Show status requested");
@@ -533,6 +541,9 @@ async fn run_tray_mode() {
                 }
                 TrayCommand::Exit => {
                     info!("Tray: Exit requested");
+                    // Set flag to prevent health monitor interference
+                    USER_DISCONNECT_IN_PROGRESS.store(true, Ordering::SeqCst);
+
                     // Cleanup if connected
                     if let Ok(Some(state)) = pmacs_vpn::VpnState::load() {
                         if state.pid.is_some() && state.is_daemon_running() {
@@ -547,11 +558,10 @@ async fn run_tray_mode() {
                     let _ = status_tx_clone.send(VpnStatus::Connecting);
 
                     // Kill existing daemon if running
-                    if let Ok(Some(state)) = pmacs_vpn::VpnState::load() {
-                        if state.pid.is_some() && state.is_daemon_running() {
+                    if let Ok(Some(state)) = pmacs_vpn::VpnState::load()
+                        && state.pid.is_some() && state.is_daemon_running() {
                             let _ = state.kill_daemon();
                         }
-                    }
 
                     // Cleanup routes and hosts
                     let _ = rt.block_on(disconnect_vpn());
@@ -581,8 +591,8 @@ async fn run_tray_mode() {
                             let mut connected = false;
                             for _ in 0..60 {
                                 std::thread::sleep(std::time::Duration::from_millis(500));
-                                if let Ok(Some(state)) = pmacs_vpn::VpnState::load() {
-                                    if state.is_daemon_running() {
+                                if let Ok(Some(state)) = pmacs_vpn::VpnState::load()
+                                    && state.is_daemon_running() {
                                         notifications::notify_connected();
                                         let _ = status_tx_clone.send(VpnStatus::Connected {
                                             ip: state.gateway.to_string(),
@@ -590,7 +600,6 @@ async fn run_tray_mode() {
                                         connected = true;
                                         break;
                                     }
-                                }
                             }
                             if !connected {
                                 let _ = status_tx_clone.send(VpnStatus::Error(
@@ -608,11 +617,10 @@ async fn run_tray_mode() {
                     info!("Tray: Auto-reconnect attempt {}", attempt);
 
                     // Cleanup stale state
-                    if let Ok(Some(state)) = pmacs_vpn::VpnState::load() {
-                        if state.pid.is_some() {
+                    if let Ok(Some(state)) = pmacs_vpn::VpnState::load()
+                        && state.pid.is_some() {
                             let _ = state.kill_daemon();
                         }
-                    }
                     let _ = rt.block_on(disconnect_vpn());
 
                     // Check for cached credentials
@@ -642,8 +650,8 @@ async fn run_tray_mode() {
                             let mut connected = false;
                             for _ in 0..60 {
                                 std::thread::sleep(std::time::Duration::from_millis(500));
-                                if let Ok(Some(state)) = pmacs_vpn::VpnState::load() {
-                                    if state.is_daemon_running() {
+                                if let Ok(Some(state)) = pmacs_vpn::VpnState::load()
+                                    && state.is_daemon_running() {
                                         notifications::notify_connected();
                                         let _ = status_tx_clone.send(VpnStatus::Connected {
                                             ip: state.gateway.to_string(),
@@ -651,7 +659,6 @@ async fn run_tray_mode() {
                                         connected = true;
                                         break;
                                     }
-                                }
                             }
                             if !connected {
                                 let _ = status_tx_clone.send(VpnStatus::Error(
@@ -690,7 +697,7 @@ async fn run_tray_mode() {
     // Spawn health monitor to detect daemon death via IPC and trigger auto-reconnect
     let status_tx_health = status_tx.clone();
     let _health_handle = tokio::spawn(async move {
-        use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+        use std::sync::atomic::{AtomicBool, AtomicU32, Ordering as AtomicOrdering};
         use pmacs_vpn::ipc::IpcClient;
 
         static WAS_CONNECTED: AtomicBool = AtomicBool::new(false);
@@ -715,16 +722,32 @@ async fn run_tray_mode() {
             // Poll every 2 seconds (faster than previous 5s for quicker detection)
             tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
 
+            // Skip health check if user-initiated disconnect is in progress
+            if USER_DISCONNECT_IN_PROGRESS.load(Ordering::SeqCst) {
+                debug!("Health monitor: User disconnect in progress, skipping");
+                // Reset connection state since user is disconnecting
+                WAS_CONNECTED.store(false, AtomicOrdering::Relaxed);
+                RECONNECT_ATTEMPTS.store(0, AtomicOrdering::Relaxed);
+                continue;
+            }
+
             // Try IPC ping first (more reliable than PID polling)
             let daemon_alive = ipc_client.ping().await.is_ok();
 
             if daemon_alive {
                 // Daemon is responding to IPC
-                WAS_CONNECTED.store(true, Ordering::Relaxed);
-                RECONNECT_ATTEMPTS.store(0, Ordering::Relaxed); // Reset on successful connection
-            } else if WAS_CONNECTED.swap(false, Ordering::Relaxed) {
+                WAS_CONNECTED.store(true, AtomicOrdering::Relaxed);
+                RECONNECT_ATTEMPTS.store(0, AtomicOrdering::Relaxed); // Reset on successful connection
+            } else if WAS_CONNECTED.swap(false, AtomicOrdering::Relaxed) {
                 // IPC failed and we were previously connected = daemon died
-                let current_attempt = RECONNECT_ATTEMPTS.fetch_add(1, Ordering::Relaxed);
+                // Double-check it's not a user-initiated disconnect (race condition)
+                if USER_DISCONNECT_IN_PROGRESS.load(Ordering::SeqCst) {
+                    debug!("Health monitor: Detected disconnect but user initiated, skipping reconnect");
+                    RECONNECT_ATTEMPTS.store(0, AtomicOrdering::Relaxed);
+                    continue;
+                }
+
+                let current_attempt = RECONNECT_ATTEMPTS.fetch_add(1, AtomicOrdering::Relaxed);
 
                 if auto_reconnect_enabled && current_attempt < max_attempts {
                     info!(
@@ -745,6 +768,14 @@ async fn run_tray_mode() {
                     // Wait with backoff before reconnecting
                     tokio::time::sleep(tokio::time::Duration::from_secs(delay as u64)).await;
 
+                    // Check one more time before triggering reconnect
+                    if USER_DISCONNECT_IN_PROGRESS.load(Ordering::SeqCst) {
+                        debug!("Health monitor: User disconnect during backoff, aborting reconnect");
+                        let _ = status_tx_health.send(VpnStatus::Disconnected);
+                        RECONNECT_ATTEMPTS.store(0, AtomicOrdering::Relaxed);
+                        continue;
+                    }
+
                     // Trigger reconnect via command channel
                     let _ = command_tx_health.send(TrayCommand::AutoReconnect {
                         attempt: current_attempt + 1,
@@ -757,17 +788,16 @@ async fn run_tray_mode() {
                         notifications::notify_unexpected_disconnect();
                     }
                     let _ = status_tx_health.send(VpnStatus::Disconnected);
-                    RECONNECT_ATTEMPTS.store(0, Ordering::Relaxed);
+                    RECONNECT_ATTEMPTS.store(0, AtomicOrdering::Relaxed);
                 }
             } else {
                 // Not connected yet, check if there's a state file indicating we should be
                 // This handles the case where daemon started but IPC server isn't ready yet
-                if let Ok(Some(state)) = pmacs_vpn::VpnState::load() {
-                    if state.pid.is_some() && state.is_daemon_running() {
+                if let Ok(Some(state)) = pmacs_vpn::VpnState::load()
+                    && state.pid.is_some() && state.is_daemon_running() {
                         // Daemon is running (by PID) but IPC not responding yet
                         // This is normal during startup, give it time
                         debug!("Health monitor: Daemon PID exists but IPC not ready");
-                    }
                 }
             }
         }
@@ -892,16 +922,22 @@ fn run_tray_mode_sync() {
                 }
                 TrayCommand::Disconnect => {
                     info!("Tray: Received disconnect command");
+
+                    // Set flag to prevent health monitor from triggering spurious notifications
+                    USER_DISCONNECT_IN_PROGRESS.store(true, Ordering::SeqCst);
+
                     let _ = status_tx_clone.send(VpnStatus::Disconnecting);
 
-                    if let Ok(Some(state)) = pmacs_vpn::VpnState::load() {
-                        if state.pid.is_some() && state.is_daemon_running() {
+                    if let Ok(Some(state)) = pmacs_vpn::VpnState::load()
+                        && state.pid.is_some() && state.is_daemon_running() {
                             let _ = state.kill_daemon();
-                        }
                     }
 
                     // Note: cleanup requires sudo on macOS, but we at least kill the daemon
                     let _ = status_tx_clone.send(VpnStatus::Disconnected);
+
+                    // Clear flag after disconnect completes
+                    USER_DISCONNECT_IN_PROGRESS.store(false, Ordering::SeqCst);
                 }
                 TrayCommand::ShowStatus => {
                     info!("Tray: Show status requested");
@@ -922,10 +958,12 @@ fn run_tray_mode_sync() {
                 }
                 TrayCommand::Exit => {
                     info!("Tray: Exit requested");
-                    if let Ok(Some(state)) = pmacs_vpn::VpnState::load() {
-                        if state.pid.is_some() && state.is_daemon_running() {
+                    // Set flag to prevent health monitor interference
+                    USER_DISCONNECT_IN_PROGRESS.store(true, Ordering::SeqCst);
+
+                    if let Ok(Some(state)) = pmacs_vpn::VpnState::load()
+                        && state.pid.is_some() && state.is_daemon_running() {
                             let _ = state.kill_daemon();
-                        }
                     }
                     break;
                 }
@@ -959,7 +997,7 @@ fn run_tray_mode_sync() {
     // Spawn health monitor using IPC
     let status_tx_health = status_tx.clone();
     rt.spawn(async move {
-        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::sync::atomic::{AtomicBool, Ordering as AtomicOrdering};
         use pmacs_vpn::ipc::IpcClient;
         static WAS_CONNECTED: AtomicBool = AtomicBool::new(false);
 
@@ -969,12 +1007,22 @@ fn run_tray_mode_sync() {
             // Poll every 2 seconds (faster than previous 5s)
             tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
 
+            // Skip health check if user-initiated disconnect is in progress
+            if USER_DISCONNECT_IN_PROGRESS.load(Ordering::SeqCst) {
+                WAS_CONNECTED.store(false, AtomicOrdering::Relaxed);
+                continue;
+            }
+
             // Try IPC ping first (more reliable than PID polling)
             let daemon_alive = ipc_client.ping().await.is_ok();
 
             if daemon_alive {
-                WAS_CONNECTED.store(true, Ordering::Relaxed);
-            } else if WAS_CONNECTED.swap(false, Ordering::Relaxed) {
+                WAS_CONNECTED.store(true, AtomicOrdering::Relaxed);
+            } else if WAS_CONNECTED.swap(false, AtomicOrdering::Relaxed) {
+                // Double-check it's not a user-initiated disconnect (race condition)
+                if USER_DISCONNECT_IN_PROGRESS.load(Ordering::SeqCst) {
+                    continue;
+                }
                 info!("Health monitor: IPC failed, daemon died unexpectedly");
                 notifications::notify_error("VPN disconnected unexpectedly");
                 let _ = status_tx_health.send(VpnStatus::Disconnected);
