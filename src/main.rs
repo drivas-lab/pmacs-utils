@@ -1772,7 +1772,7 @@ async fn connect_vpn_with_token(token: AuthToken) -> Result<(), Box<dyn std::err
                     info!("Daemon: received SIGHUP");
                     Ok(())
                 }
-                _ = ipc_shutdown_rx.recv() => {
+                Ok(()) = ipc_shutdown_rx.recv() => {
                     info!("Daemon: received IPC disconnect request");
                     Ok(())
                 }
@@ -1792,7 +1792,7 @@ async fn connect_vpn_with_token(token: AuthToken) -> Result<(), Box<dyn std::err
                     info!("Daemon: received shutdown signal");
                     Ok(())
                 }
-                _ = ipc_shutdown_rx.recv() => {
+                Ok(()) = ipc_shutdown_rx.recv() => {
                     info!("Daemon: received IPC disconnect request");
                     Ok(())
                 }
