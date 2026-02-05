@@ -47,7 +47,7 @@ impl IpcClient {
         let response = self.send_request(TrayRequest::Ping).await?;
         match response {
             DaemonResponse::Pong => Ok(()),
-            DaemonResponse::Error(e) => Err(io::Error::new(io::ErrorKind::Other, e)),
+            DaemonResponse::Error(e) => Err(io::Error::other(e)),
             _ => Err(io::Error::new(
                 io::ErrorKind::InvalidData,
                 "Unexpected response to ping",
@@ -62,7 +62,7 @@ impl IpcClient {
         let response = self.send_request(TrayRequest::GetStatus).await?;
         match response {
             DaemonResponse::Status(status) => Ok(status),
-            DaemonResponse::Error(e) => Err(io::Error::new(io::ErrorKind::Other, e)),
+            DaemonResponse::Error(e) => Err(io::Error::other(e)),
             _ => Err(io::Error::new(
                 io::ErrorKind::InvalidData,
                 "Unexpected response to GetStatus",
@@ -77,7 +77,7 @@ impl IpcClient {
         let response = self.send_request(TrayRequest::Disconnect).await?;
         match response {
             DaemonResponse::Disconnected => Ok(()),
-            DaemonResponse::Error(e) => Err(io::Error::new(io::ErrorKind::Other, e)),
+            DaemonResponse::Error(e) => Err(io::Error::other(e)),
             _ => Err(io::Error::new(
                 io::ErrorKind::InvalidData,
                 "Unexpected response to Disconnect",
@@ -103,7 +103,7 @@ impl IpcClient {
             Ok(Ok(s)) => s,
             Ok(Err(e)) => {
                 debug!("Failed to connect to IPC: {}", e);
-                return Err(e.into());
+                return Err(e);
             }
             Err(_) => {
                 debug!("IPC connect timeout");

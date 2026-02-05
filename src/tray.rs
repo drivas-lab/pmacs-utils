@@ -284,11 +284,10 @@ impl TrayApp {
 
                         // Kill daemon synchronously before exiting
                         // (can't rely on async handler - event loop exits immediately)
-                        if let Ok(Some(state)) = crate::VpnState::load() {
-                            if state.pid.is_some() && state.is_daemon_running() {
+                        if let Ok(Some(state)) = crate::VpnState::load()
+                            && state.pid.is_some() && state.is_daemon_running() {
                                 info!("Killing VPN daemon before exit");
                                 let _ = state.kill_daemon();
-                            }
                         }
 
                         let _ = command_tx.send(TrayCommand::Exit);
@@ -428,26 +427,18 @@ fn create_solid_icon(r: u8, g: u8, b: u8, a: u8) -> tray_icon::Icon {
 
 /// Update tray icon and tooltip based on VPN status
 fn update_tray_for_status(tray: &TrayIcon, status: &VpnStatus) {
-    let (icon, tooltip) = match status {
-        VpnStatus::Disconnected => (create_disconnected_icon(), "PMACS VPN - Disconnected"),
-        VpnStatus::Connecting => (create_connecting_icon(), "PMACS VPN - Connecting..."),
+    let (icon, tooltip): (tray_icon::Icon, String) = match status {
+        VpnStatus::Disconnected => (create_disconnected_icon(), "PMACS VPN - Disconnected".to_string()),
+        VpnStatus::Connecting => (create_connecting_icon(), "PMACS VPN - Connecting...".to_string()),
         VpnStatus::Connected { ip } => {
-            let tooltip = format!("PMACS VPN - Connected ({})", ip);
-            // Leak the string since set_tooltip needs &str with static lifetime behavior
-            // This is fine since we only have a few status changes
-            let tooltip_static: &'static str = Box::leak(tooltip.into_boxed_str());
-            (create_connected_icon(), tooltip_static)
+            (create_connected_icon(), format!("PMACS VPN - Connected ({})", ip))
         }
-        VpnStatus::Disconnecting => (create_connecting_icon(), "PMACS VPN - Disconnecting..."),
+        VpnStatus::Disconnecting => (create_connecting_icon(), "PMACS VPN - Disconnecting...".to_string()),
         VpnStatus::Reconnecting { attempt, max_attempts } => {
-            let tooltip = format!("PMACS VPN - Reconnecting ({}/{})", attempt, max_attempts);
-            let tooltip_static: &'static str = Box::leak(tooltip.into_boxed_str());
-            (create_connecting_icon(), tooltip_static)
+            (create_connecting_icon(), format!("PMACS VPN - Reconnecting ({}/{})", attempt, max_attempts))
         }
         VpnStatus::Error(msg) => {
-            let tooltip = format!("PMACS VPN - Error: {}", msg);
-            let tooltip_static: &'static str = Box::leak(tooltip.into_boxed_str());
-            (create_error_icon(), tooltip_static)
+            (create_error_icon(), format!("PMACS VPN - Error: {}", msg))
         }
     };
 
