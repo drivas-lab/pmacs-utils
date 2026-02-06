@@ -16,25 +16,41 @@ use tracing_subscriber::FmtSubscriber;
 /// This prevents the health monitor from triggering auto-reconnect
 static USER_DISCONNECT_IN_PROGRESS: AtomicBool = AtomicBool::new(false);
 
-/// Get the config file path (respects XDG_CONFIG_HOME and HOME)
+/// Get the config file path
+///
+/// Searches for an existing config in priority order, falling back to
+/// the preferred platform path for new config creation:
+///   1. $XDG_CONFIG_HOME/pmacs-vpn/config.toml
+///   2. $HOME/.config/pmacs-vpn/config.toml
+///   3. pmacs-vpn.toml (working directory — legacy/development)
+///   4. Platform config dir (AppData\Roaming on Windows, ~/.config on Linux)
 fn get_config_path() -> PathBuf {
-    // Try XDG_CONFIG_HOME first
-    if let Ok(xdg) = std::env::var("XDG_CONFIG_HOME") {
-        return PathBuf::from(xdg).join("pmacs-vpn").join("config.toml");
+    let candidates: Vec<Option<PathBuf>> = vec![
+        std::env::var("XDG_CONFIG_HOME")
+            .ok()
+            .map(|xdg| PathBuf::from(xdg).join("pmacs-vpn").join("config.toml")),
+        std::env::var("HOME")
+            .ok()
+            .map(|home| PathBuf::from(home).join(".config").join("pmacs-vpn").join("config.toml")),
+        Some(PathBuf::from("pmacs-vpn.toml")),
+        dirs::config_dir().map(|d| d.join("pmacs-vpn").join("config.toml")),
+    ];
+
+    // Return the first path where a config actually exists
+    for path in candidates.iter().flatten() {
+        if path.exists() {
+            return path.clone();
+        }
     }
 
-    // Fall back to HOME/.config
-    if let Ok(home) = std::env::var("HOME") {
-        return PathBuf::from(home).join(".config").join("pmacs-vpn").join("config.toml");
+    // No existing config found — return preferred path for new config creation
+    // (skip the relative path; new configs belong in a proper config directory)
+    if let Some(path) = candidates[..2].iter().flatten().next() {
+        return path.clone();
     }
-
-    // Last resort: use dirs crate
-    if let Some(config) = dirs::config_dir() {
-        return config.join("pmacs-vpn").join("config.toml");
-    }
-
-    // Fallback to relative path (shouldn't happen)
-    PathBuf::from("pmacs-vpn.toml")
+    candidates[3]
+        .clone()
+        .unwrap_or_else(|| PathBuf::from("pmacs-vpn.toml"))
 }
 
 #[derive(Parser)]
