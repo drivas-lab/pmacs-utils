@@ -290,10 +290,14 @@ pub fn cleanup_ipc(_ipc_path: &str) {
 mod tests {
     use super::*;
     use crate::ipc::client::IpcClient;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    static TEST_COUNTER: AtomicU64 = AtomicU64::new(0);
 
     /// Generate a unique IPC path for testing (avoids conflict with running daemon)
     fn test_ipc_path() -> String {
         let id = std::process::id();
+        let seq = TEST_COUNTER.fetch_add(1, Ordering::Relaxed);
         let ts = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
@@ -301,11 +305,11 @@ mod tests {
 
         #[cfg(windows)]
         {
-            format!(r"\\.\pipe\pmacs-vpn-test-{}-{}", id, ts)
+            format!(r"\\.\pipe\pmacs-vpn-test-{}-{}-{}", id, ts, seq)
         }
         #[cfg(not(windows))]
         {
-            format!("/tmp/pmacs-vpn-test-{}-{}.sock", id, ts)
+            format!("/tmp/pmacs-vpn-test-{}-{}-{}.sock", id, ts, seq)
         }
     }
 
