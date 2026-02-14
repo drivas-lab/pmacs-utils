@@ -358,18 +358,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
 
             info!("Starting system tray mode...");
-
-            // On macOS, run tray synchronously on main thread (AppKit requirement)
-            #[cfg(target_os = "macos")]
-            {
-                run_tray_mode_sync();
-            }
-
-            // On Windows/Linux, run in async context
-            #[cfg(not(target_os = "macos"))]
-            {
-                run_tray_mode().await;
-            }
+            run_tray_mode().await;
         }
     }
 
@@ -869,8 +858,7 @@ fn start_tray_services(
     (app, status_tx)
 }
 
-/// Run the VPN with system tray GUI
-#[cfg(not(target_os = "macos"))]
+/// Run the VPN with system tray GUI.
 async fn run_tray_mode() {
     let _ = ctrlc::set_handler(move || {
         cleanup_vpn_on_exit();
@@ -881,30 +869,23 @@ async fn run_tray_mode() {
     let (app, status_tx) = start_tray_services(&rt);
     initialize_tray_status(&status_tx).await;
 
+    #[cfg(target_os = "macos")]
+    {
+        // AppKit/tray must run on the process main thread on macOS.
+        app.run();
+    }
+
+    #[cfg(not(target_os = "macos"))]
     let tray_handle = std::thread::spawn(move || {
         app.run();
     });
 
+    #[cfg(not(target_os = "macos"))]
     let _ = tray_handle.join();
-    cleanup_vpn_on_exit();
-}
-
-/// Run tray mode synchronously on the main thread (required for macOS).
-#[cfg(target_os = "macos")]
-fn run_tray_mode_sync() {
-    let _ = ctrlc::set_handler(move || {
+    #[cfg(not(target_os = "macos"))]
+    {
         cleanup_vpn_on_exit();
-        std::process::exit(0);
-    });
-
-    let rt = tokio::runtime::Runtime::new().expect("Failed to create tokio runtime");
-    let handle = rt.handle().clone();
-
-    let (app, status_tx) = start_tray_services(&handle);
-    rt.block_on(initialize_tray_status(&status_tx));
-
-    // Must run on main thread for AppKit.
-    app.run();
+    }
 }
 
 #[cfg(target_os = "macos")]

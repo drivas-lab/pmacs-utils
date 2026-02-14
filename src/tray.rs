@@ -309,20 +309,13 @@ impl TrayApp {
                     } else if event.id == exit_id {
                         info!("Tray: Exit clicked");
 
-                        // Exit is handled synchronously here because Tao's event loop exits
-                        // immediately after ControlFlow::Exit.
-                        if let Ok(rt) = tokio::runtime::Builder::new_current_thread()
-                            .enable_all()
-                            .build()
+                        // Best effort fallback in case command handler doesn't process Exit
+                        // before the event loop terminates.
+                        if let Ok(Some(state)) = crate::VpnState::load()
+                            && state.pid.is_some()
+                            && state.is_daemon_running()
                         {
-                            let ipc_client = crate::ipc::IpcClient::new();
-                            if rt.block_on(ipc_client.disconnect()).is_err()
-                                && let Ok(Some(state)) = crate::VpnState::load()
-                                && state.pid.is_some()
-                                && state.is_daemon_running()
-                            {
-                                let _ = state.kill_daemon();
-                            }
+                            let _ = state.kill_daemon();
                         }
 
                         let _ = command_tx.send(TrayCommand::Exit);
