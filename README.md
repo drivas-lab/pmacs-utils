@@ -8,52 +8,73 @@ This slows down everything, blocks access to Gmail, and is generally creepy.
 This is a lightweight alternative that keeps your non-PMACS traffic private.
 Written in Rust and pure spite.
 
-# Quickstart
+# Quickstart (Local Dev)
 
-## macOS
+## macOS (menu-bar tray)
 
 ```bash
-# Download and install
-curl -L https://github.com/DrivasLab/pmacs-utils/releases/latest/download/pmacs-vpn-macos -o pmacs-vpn
-chmod +x pmacs-vpn
-sudo mv pmacs-vpn /usr/local/bin/
+# Build locally
+cargo build
 
-# First-time setup
-pmacs-vpn init
+# One-time setup + save credentials
+./target/debug/pmacs-vpn init
+sudo ./target/debug/pmacs-vpn connect --save-password
+sudo ./target/debug/pmacs-vpn disconnect
 
-# Connect (enter VPN password when prompted, approve DUO push)
-sudo pmacs-vpn connect
+# Start tray in menu bar (run as normal user, not sudo)
+./target/debug/pmacs-vpn tray
 ```
 
-**Test it worked:** Open a new terminal and run `ssh prometheus.pmacs.upenn.edu`
+Tray behavior on macOS:
+- Connect/Reconnect/Disconnect now work from the tray like Windows.
+- First connect/reconnect may show a macOS admin prompt (AppleScript elevation).
+- Use tray menu `macOS Permissions` to view Accessibility/Input Monitoring diagnostics.
 
-## Tips
+### Optional: Touch ID for sudo (better UX for non-tray CLI flows)
 
-### Skip the sudo password
-
-Add Touch ID for sudo on your Mac. One-time setup in your terminal:
 ```bash
 sudo sed -i '' '2i\
 auth       sufficient     pam_tid.so
 ' /etc/pam.d/sudo
 ```
 
-### Run in background
+## Windows (system tray)
 
-```bash
-sudo pmacs-vpn connect --background   # runs in background
-pmacs-vpn status                      # check if connected
-sudo pmacs-vpn disconnect             # stop
+Run from an Administrator terminal:
+
+```powershell
+cargo build
+.\target\debug\pmacs-vpn.exe init
+.\target\debug\pmacs-vpn.exe connect --save-password
+.\target\debug\pmacs-vpn.exe disconnect
+.\target\debug\pmacs-vpn.exe tray
 ```
 
-**Keychain popup asking for password:** Click "Always Allow" so it doesn't ask again.
+Tray behavior on Windows:
+- `tray` relaunches itself hidden (no console window).
+- Connect/Reconnect/Disconnect work from tray.
+- `Start with Windows` menu option controls auto-start registry entry.
 
-### Set up SSH keys for automatic connection:
+## Background CLI mode (both platforms)
 
 ```bash
-ssh-keygen -t ed25519
-ssh-copy-id prometheus.pmacs.upenn.edu
+sudo ./target/debug/pmacs-vpn connect --background
+./target/debug/pmacs-vpn status
+sudo ./target/debug/pmacs-vpn disconnect
 ```
+
+## Tray Architecture (Current)
+
+- `src/tray.rs`: UI/event-loop layer only (menu, icon, state rendering).
+- `src/main.rs`: cross-platform tray controller (command handling, daemon lifecycle, health monitor, reconnect logic).
+- `src/ipc/*`: tray-daemon protocol (ping/status/disconnect) over named pipe (Windows) or Unix socket (macOS/Linux).
+- `src/macos_permissions.rs`: macOS diagnostics for Accessibility and Input Monitoring checks.
+
+## Platform Parity Notes
+
+- Windows and macOS now share the same tray command/state controller path.
+- Both platforms expose Connect, Disconnect, Reconnect, Start-at-login, DUO method, and saved-password toggles.
+- macOS difference: tray connect/reconnect performs admin elevation via macOS prompt instead of requiring tray to run as root.
 
 ---
 
@@ -75,23 +96,6 @@ email, your Spotify, your Google searches. All of it.
 pmacs-vpn connects only when you need it, routes only PMACS hosts through the tunnel, and exits
 cleanly when you're done. Your other traffic stays between you and your ISP.
 
-
-## Windows
-
-Download `pmacs-vpn.exe` from [Releases](https://github.com/DrivasLab/pmacs-utils/releases/latest), then run as Administrator:
-
-```cmd
-pmacs-vpn init
-pmacs-vpn connect
-```
-
-### System tray
-
-```cmd
-pmacs-vpn tray
-```
-
----
 
 ## Configuration
 
