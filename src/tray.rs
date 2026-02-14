@@ -8,9 +8,9 @@ use tao::event::{Event, StartCause};
 use tao::event_loop::{ControlFlow, EventLoopBuilder};
 #[cfg(target_os = "windows")]
 use tao::platform::windows::EventLoopBuilderExtWindows;
+use tracing::{debug, error, info};
 use tray_icon::menu::{CheckMenuItem, Menu, MenuEvent, MenuItem, PredefinedMenuItem, Submenu};
 use tray_icon::{TrayIcon, TrayIconBuilder, TrayIconEvent};
-use tracing::{debug, error, info};
 
 use crate::config::DuoMethod;
 use crate::notifications;
@@ -35,6 +35,8 @@ pub enum TrayCommand {
     AutoReconnect { attempt: u32 },
     /// Show status window (future)
     ShowStatus,
+    /// Show platform diagnostics
+    ShowDiagnostics,
     /// Exit the application
     Exit,
     /// Toggle save password preference
@@ -83,7 +85,12 @@ impl TrayApp {
         auto_connect: bool,
         save_password: bool,
         duo_method: DuoMethod,
-    ) -> (Self, mpsc::Receiver<TrayCommand>, mpsc::Sender<VpnStatus>, mpsc::Sender<TrayCommand>) {
+    ) -> (
+        Self,
+        mpsc::Receiver<TrayCommand>,
+        mpsc::Sender<VpnStatus>,
+        mpsc::Sender<TrayCommand>,
+    ) {
         let (command_tx, command_rx) = mpsc::channel();
         let (status_tx, status_rx) = mpsc::channel();
 
@@ -134,23 +141,38 @@ impl TrayApp {
         let reconnect_item = MenuItem::new("Reconnect", false, None);
 
         // Preferences menu items
-        let save_password_item = CheckMenuItem::new("Stay logged in", true, self.save_password, None);
+        let save_password_item =
+            CheckMenuItem::new("Stay logged in", true, self.save_password, None);
 
         // DUO method submenu
         let duo_submenu = Submenu::new("DUO Method", true);
-        let duo_push_item = CheckMenuItem::new("Push", true, self.duo_method == DuoMethod::Push, None);
+        let duo_push_item =
+            CheckMenuItem::new("Push", true, self.duo_method == DuoMethod::Push, None);
         let duo_sms_item = CheckMenuItem::new("SMS", true, self.duo_method == DuoMethod::Sms, None);
-        let duo_call_item = CheckMenuItem::new("Call", true, self.duo_method == DuoMethod::Call, None);
-        let duo_passcode_item = CheckMenuItem::new("Passcode", true, self.duo_method == DuoMethod::Passcode, None);
+        let duo_call_item =
+            CheckMenuItem::new("Call", true, self.duo_method == DuoMethod::Call, None);
+        let duo_passcode_item = CheckMenuItem::new(
+            "Passcode",
+            true,
+            self.duo_method == DuoMethod::Passcode,
+            None,
+        );
 
-        duo_submenu.append_items(&[
-            &duo_push_item,
-            &duo_sms_item,
-            &duo_call_item,
-            &duo_passcode_item,
-        ]).expect("Failed to build DUO submenu");
+        duo_submenu
+            .append_items(&[
+                &duo_push_item,
+                &duo_sms_item,
+                &duo_call_item,
+                &duo_passcode_item,
+            ])
+            .expect("Failed to build DUO submenu");
 
-        let startup_item = CheckMenuItem::new(STARTUP_LABEL, true, startup::is_startup_enabled(), None);
+        let startup_item =
+            CheckMenuItem::new(STARTUP_LABEL, true, startup::is_startup_enabled(), None);
+        #[cfg(target_os = "macos")]
+        let diagnostics_item = MenuItem::new("macOS Permissions", true, None);
+        #[cfg(not(target_os = "macos"))]
+        let diagnostics_item = MenuItem::new("Diagnostics", true, None);
         let exit_item = MenuItem::new("Exit", true, None);
 
         // Store item IDs for event matching
@@ -163,6 +185,7 @@ impl TrayApp {
         let duo_call_id = duo_call_item.id().clone();
         let duo_passcode_id = duo_passcode_item.id().clone();
         let startup_id = startup_item.id().clone();
+        let diagnostics_id = diagnostics_item.id().clone();
         let exit_id = exit_item.id().clone();
 
         // Build menu
@@ -177,6 +200,7 @@ impl TrayApp {
             &save_password_item,
             &duo_submenu,
             &startup_item,
+            &diagnostics_item,
             &PredefinedMenuItem::separator(),
             &exit_item,
         ])
@@ -279,15 +303,26 @@ impl TrayApp {
                                 error!("Failed to toggle startup: {}", e);
                             }
                         }
+                    } else if event.id == diagnostics_id {
+                        info!("Tray: Diagnostics clicked");
+                        let _ = command_tx.send(TrayCommand::ShowDiagnostics);
                     } else if event.id == exit_id {
                         info!("Tray: Exit clicked");
 
-                        // Kill daemon synchronously before exiting
-                        // (can't rely on async handler - event loop exits immediately)
-                        if let Ok(Some(state)) = crate::VpnState::load()
-                            && state.pid.is_some() && state.is_daemon_running() {
-                                info!("Killing VPN daemon before exit");
+                        // Exit is handled synchronously here because Tao's event loop exits
+                        // immediately after ControlFlow::Exit.
+                        if let Ok(rt) = tokio::runtime::Builder::new_current_thread()
+                            .enable_all()
+                            .build()
+                        {
+                            let ipc_client = crate::ipc::IpcClient::new();
+                            if rt.block_on(ipc_client.disconnect()).is_err()
+                                && let Ok(Some(state)) = crate::VpnState::load()
+                                && state.pid.is_some()
+                                && state.is_daemon_running()
+                            {
                                 let _ = state.kill_daemon();
+                            }
                         }
 
                         let _ = command_tx.send(TrayCommand::Exit);
@@ -331,8 +366,14 @@ impl TrayApp {
                                 disconnect_item.set_enabled(false);
                                 reconnect_item.set_enabled(false);
                             }
-                            VpnStatus::Reconnecting { attempt, max_attempts } => {
-                                status_item.set_text(format!("Status: Reconnecting ({}/{})", attempt, max_attempts));
+                            VpnStatus::Reconnecting {
+                                attempt,
+                                max_attempts,
+                            } => {
+                                status_item.set_text(format!(
+                                    "Status: Reconnecting ({}/{})",
+                                    attempt, max_attempts
+                                ));
                                 connect_item.set_enabled(false);
                                 disconnect_item.set_enabled(true);
                                 reconnect_item.set_enabled(false);
@@ -428,18 +469,30 @@ fn create_solid_icon(r: u8, g: u8, b: u8, a: u8) -> tray_icon::Icon {
 /// Update tray icon and tooltip based on VPN status
 fn update_tray_for_status(tray: &TrayIcon, status: &VpnStatus) {
     let (icon, tooltip): (tray_icon::Icon, String) = match status {
-        VpnStatus::Disconnected => (create_disconnected_icon(), "PMACS VPN - Disconnected".to_string()),
-        VpnStatus::Connecting => (create_connecting_icon(), "PMACS VPN - Connecting...".to_string()),
-        VpnStatus::Connected { ip } => {
-            (create_connected_icon(), format!("PMACS VPN - Connected ({})", ip))
-        }
-        VpnStatus::Disconnecting => (create_connecting_icon(), "PMACS VPN - Disconnecting...".to_string()),
-        VpnStatus::Reconnecting { attempt, max_attempts } => {
-            (create_connecting_icon(), format!("PMACS VPN - Reconnecting ({}/{})", attempt, max_attempts))
-        }
-        VpnStatus::Error(msg) => {
-            (create_error_icon(), format!("PMACS VPN - Error: {}", msg))
-        }
+        VpnStatus::Disconnected => (
+            create_disconnected_icon(),
+            "PMACS VPN - Disconnected".to_string(),
+        ),
+        VpnStatus::Connecting => (
+            create_connecting_icon(),
+            "PMACS VPN - Connecting...".to_string(),
+        ),
+        VpnStatus::Connected { ip } => (
+            create_connected_icon(),
+            format!("PMACS VPN - Connected ({})", ip),
+        ),
+        VpnStatus::Disconnecting => (
+            create_connecting_icon(),
+            "PMACS VPN - Disconnecting...".to_string(),
+        ),
+        VpnStatus::Reconnecting {
+            attempt,
+            max_attempts,
+        } => (
+            create_connecting_icon(),
+            format!("PMACS VPN - Reconnecting ({}/{})", attempt, max_attempts),
+        ),
+        VpnStatus::Error(msg) => (create_error_icon(), format!("PMACS VPN - Error: {}", msg)),
     };
 
     if let Err(e) = tray.set_icon(Some(icon)) {

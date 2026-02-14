@@ -18,6 +18,7 @@ pub mod credentials;
 pub mod gp;
 pub mod ipc;
 pub mod launchd;
+pub mod macos_permissions;
 pub mod notifications;
 pub mod platform;
 pub mod startup;

@@ -3,15 +3,17 @@
 //! Listens on a named pipe (Windows) or Unix socket (Linux/macOS)
 //! and handles requests from the tray application.
 
-use super::protocol::{read_message, write_message, DaemonResponse, DaemonStatus, TrayRequest};
+use super::protocol::{DaemonResponse, DaemonStatus, TrayRequest, read_message, write_message};
 use std::io;
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
-use tokio::sync::{broadcast, RwLock};
-use tracing::{debug, error, info, warn};
+use tokio::sync::{RwLock, broadcast};
+#[cfg(windows)]
+use tracing::error;
+use tracing::{debug, info, warn};
 
 #[cfg(windows)]
-use interprocess::local_socket::tokio::{prelude::*, Stream};
+use interprocess::local_socket::tokio::{Stream, prelude::*};
 #[cfg(windows)]
 use interprocess::local_socket::{GenericFilePath, ListenerOptions};
 
@@ -68,10 +70,7 @@ pub struct IpcServer {
 
 impl IpcServer {
     /// Create a new IPC server with the given daemon state
-    pub fn new(
-        ipc_path: String,
-        state: DaemonState,
-    ) -> (Self, broadcast::Receiver<()>) {
+    pub fn new(ipc_path: String, state: DaemonState) -> (Self, broadcast::Receiver<()>) {
         let (shutdown_tx, shutdown_rx) = broadcast::channel(1);
 
         let server = Self {
@@ -94,7 +93,10 @@ impl IpcServer {
         info!("Starting IPC server on {}", self.ipc_path);
 
         // Create listener options with the named pipe path
-        let name = self.ipc_path.clone().to_fs_name::<GenericFilePath>()
+        let name = self
+            .ipc_path
+            .clone()
+            .to_fs_name::<GenericFilePath>()
             .map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e.to_string()))?;
 
         let listener = ListenerOptions::new()
@@ -143,9 +145,29 @@ impl IpcServer {
         // Set socket permissions (owner read/write only)
         #[cfg(unix)]
         {
+            use nix::unistd::{Gid, Uid, chown};
             use std::os::unix::fs::PermissionsExt;
+
             let perms = std::fs::Permissions::from_mode(0o600);
             let _ = std::fs::set_permissions(&self.ipc_path, perms);
+
+            // If tray launched daemon through elevation (macOS), transfer socket
+            // ownership to the tray user so non-root tray can talk to root daemon.
+            let uid = std::env::var("PMACS_VPN_IPC_UID")
+                .ok()
+                .and_then(|v| v.parse::<u32>().ok());
+            let gid = std::env::var("PMACS_VPN_IPC_GID")
+                .ok()
+                .and_then(|v| v.parse::<u32>().ok());
+            if let (Some(uid), Some(gid)) = (uid, gid)
+                && let Err(e) = chown(
+                    std::path::Path::new(&self.ipc_path),
+                    Some(Uid::from_raw(uid)),
+                    Some(Gid::from_raw(gid)),
+                )
+            {
+                warn!("Failed to chown IPC socket to tray user: {}", e);
+            }
         }
 
         info!("IPC server listening");
@@ -287,6 +309,17 @@ mod tests {
         }
     }
 
+    async fn wait_for_server_ready(ipc_path: &str) {
+        let client = IpcClient::with_path(ipc_path.to_string());
+        for _ in 0..40 {
+            if client.ping().await.is_ok() {
+                return;
+            }
+            tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
+        }
+        panic!("IPC server did not become ready at {}", ipc_path);
+    }
+
     #[tokio::test]
     async fn test_ipc_ping_pong() {
         let ipc_path = test_ipc_path();
@@ -304,8 +337,8 @@ mod tests {
             let _ = server.run().await;
         });
 
-        // Give server time to start
-        tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+        // Wait until server is actually reachable (avoids test flake on busy CI).
+        wait_for_server_ready(&ipc_path).await;
 
         // Test ping
         let client = IpcClient::with_path(ipc_path.clone());
@@ -314,7 +347,11 @@ mod tests {
 
         // Test get_status
         let status = client.get_status().await;
-        assert!(status.is_ok(), "GetStatus should succeed: {:?}", status.err());
+        assert!(
+            status.is_ok(),
+            "GetStatus should succeed: {:?}",
+            status.err()
+        );
         let status = status.unwrap();
         assert_eq!(status.tunnel_device, "tun0");
         assert_eq!(status.gateway, "10.0.0.1");
@@ -340,20 +377,21 @@ mod tests {
             let _ = server.run().await;
         });
 
-        // Give server time to start
-        tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+        // Wait until server is actually reachable (avoids test flake on busy CI).
+        wait_for_server_ready(&ipc_path).await;
 
         // Send disconnect request
         let client = IpcClient::with_path(ipc_path.clone());
         let result = client.disconnect().await;
-        assert!(result.is_ok(), "Disconnect should succeed: {:?}", result.err());
+        assert!(
+            result.is_ok(),
+            "Disconnect should succeed: {:?}",
+            result.err()
+        );
 
         // Check that shutdown was triggered
-        let shutdown_received = tokio::time::timeout(
-            tokio::time::Duration::from_millis(500),
-            shutdown_rx.recv(),
-        )
-        .await;
+        let shutdown_received =
+            tokio::time::timeout(tokio::time::Duration::from_millis(500), shutdown_rx.recv()).await;
         assert!(shutdown_received.is_ok(), "Should receive shutdown signal");
 
         // Cleanup

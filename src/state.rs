@@ -111,9 +111,7 @@ impl VpnState {
             .or_else(|_| std::env::var("USERPROFILE"))
             .or_else(|_| std::env::var("LOCALAPPDATA"))
             .map_err(|_| {
-                StateError::DirectoryError(
-                    "HOME/USERPROFILE/LOCALAPPDATA not set".into(),
-                )
+                StateError::DirectoryError("HOME/USERPROFILE/LOCALAPPDATA not set".into())
             })?;
 
         let state_dir = PathBuf::from(home).join(".pmacs-vpn");
@@ -199,15 +197,18 @@ impl VpnState {
     /// Check if the daemon process is still running
     #[cfg(not(windows))]
     pub fn is_daemon_running(&self) -> bool {
-        use std::process::Command;
+        use nix::errno::Errno;
+        use nix::sys::signal::kill;
+        use nix::unistd::Pid;
 
         if let Some(pid) = self.pid {
-            // Use kill -0 to check if process exists (doesn't actually send signal)
-            Command::new("kill")
-                .args(["-0", &pid.to_string()])
-                .status()
-                .map(|s| s.success())
-                .unwrap_or(false)
+            // EPERM means process exists but current user is not allowed to signal it.
+            match kill(Pid::from_raw(pid as i32), None) {
+                Ok(()) => true,
+                Err(Errno::EPERM) => true,
+                Err(Errno::ESRCH) => false,
+                Err(_) => false,
+            }
         } else {
             false
         }
@@ -220,7 +221,7 @@ impl VpnState {
             // Use Windows API directly for better reliability
             use windows::Win32::Foundation::CloseHandle;
             use windows::Win32::System::Threading::{
-                OpenProcess, TerminateProcess, PROCESS_TERMINATE,
+                OpenProcess, PROCESS_TERMINATE, TerminateProcess,
             };
 
             unsafe {
