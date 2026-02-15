@@ -29,9 +29,9 @@ impl DuoMethod {
     pub fn as_auth_str(&self) -> Option<&'static str> {
         match self {
             DuoMethod::Push => Some("push"),
-            DuoMethod::Sms => Some("sms1"),  // DUO uses sms1 for first SMS
+            DuoMethod::Sms => Some("sms1"), // DUO uses sms1 for first SMS
             DuoMethod::Call => Some("phone1"), // DUO uses phone1 for first phone
-            DuoMethod::Passcode => None,  // User will be prompted for passcode
+            DuoMethod::Passcode => None,    // User will be prompted for passcode
         }
     }
 
@@ -95,7 +95,7 @@ fn default_reconnect_delay() -> u32 {
 }
 
 fn default_inbound_timeout() -> u32 {
-    45  // Faster dead tunnel detection (was 90s)
+    45 // Faster dead tunnel detection (was 90s)
 }
 
 impl Default for Preferences {
@@ -156,6 +156,44 @@ impl Config {
         std::fs::write(path, content)?;
         Ok(())
     }
+}
+
+/// Resolve config file path.
+///
+/// Searches for an existing config in priority order, falling back to
+/// the preferred platform path for new config creation:
+/// 1. $XDG_CONFIG_HOME/pmacs-vpn/config.toml
+/// 2. $HOME/.config/pmacs-vpn/config.toml
+/// 3. pmacs-vpn.toml (working directory, legacy/dev)
+/// 4. Platform config dir (AppData\\Roaming on Windows, ~/.config on Linux/macOS)
+pub fn resolve_config_path() -> PathBuf {
+    let candidates: Vec<Option<PathBuf>> = vec![
+        std::env::var("XDG_CONFIG_HOME")
+            .ok()
+            .map(|xdg| PathBuf::from(xdg).join("pmacs-vpn").join("config.toml")),
+        std::env::var("HOME").ok().map(|home| {
+            PathBuf::from(home)
+                .join(".config")
+                .join("pmacs-vpn")
+                .join("config.toml")
+        }),
+        Some(PathBuf::from("pmacs-vpn.toml")),
+        dirs::config_dir().map(|d| d.join("pmacs-vpn").join("config.toml")),
+    ];
+
+    for path in candidates.iter().flatten() {
+        if path.exists() {
+            return path.clone();
+        }
+    }
+
+    if let Some(path) = candidates[..2].iter().flatten().next() {
+        return path.clone();
+    }
+
+    candidates[3]
+        .clone()
+        .unwrap_or_else(|| PathBuf::from("pmacs-vpn.toml"))
 }
 
 #[cfg(test)]

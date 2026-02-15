@@ -4,7 +4,6 @@ use pmacs_vpn::gp;
 use pmacs_vpn::notifications;
 use pmacs_vpn::vpn::hosts::HostsManager;
 use pmacs_vpn::vpn::routing::VpnRouter;
-use std::path::PathBuf;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, Ordering};
 #[cfg(unix)]
@@ -16,44 +15,9 @@ use tracing_subscriber::FmtSubscriber;
 /// This prevents the health monitor from triggering auto-reconnect
 static USER_DISCONNECT_IN_PROGRESS: AtomicBool = AtomicBool::new(false);
 
-/// Get the config file path
-///
-/// Searches for an existing config in priority order, falling back to
-/// the preferred platform path for new config creation:
-///   1. $XDG_CONFIG_HOME/pmacs-vpn/config.toml
-///   2. $HOME/.config/pmacs-vpn/config.toml
-///   3. pmacs-vpn.toml (working directory — legacy/development)
-///   4. Platform config dir (AppData\Roaming on Windows, ~/.config on Linux)
-fn get_config_path() -> PathBuf {
-    let candidates: Vec<Option<PathBuf>> = vec![
-        std::env::var("XDG_CONFIG_HOME")
-            .ok()
-            .map(|xdg| PathBuf::from(xdg).join("pmacs-vpn").join("config.toml")),
-        std::env::var("HOME").ok().map(|home| {
-            PathBuf::from(home)
-                .join(".config")
-                .join("pmacs-vpn")
-                .join("config.toml")
-        }),
-        Some(PathBuf::from("pmacs-vpn.toml")),
-        dirs::config_dir().map(|d| d.join("pmacs-vpn").join("config.toml")),
-    ];
-
-    // Return the first path where a config actually exists
-    for path in candidates.iter().flatten() {
-        if path.exists() {
-            return path.clone();
-        }
-    }
-
-    // No existing config found — return preferred path for new config creation
-    // (skip the relative path; new configs belong in a proper config directory)
-    if let Some(path) = candidates[..2].iter().flatten().next() {
-        return path.clone();
-    }
-    candidates[3]
-        .clone()
-        .unwrap_or_else(|| PathBuf::from("pmacs-vpn.toml"))
+/// Get the config file path.
+fn get_config_path() -> std::path::PathBuf {
+    pmacs_vpn::resolve_config_path()
 }
 
 #[derive(Parser)]
@@ -110,7 +74,11 @@ enum Commands {
         user: String,
     },
     /// Run with system tray (GUI mode)
-    Tray,
+    Tray {
+        /// Internal: mark tray launch as OS login/autostart launch
+        #[arg(long, hide = true)]
+        launched_at_login: bool,
+    },
 }
 
 /// Check if running with admin privileges (Windows)
@@ -134,9 +102,9 @@ fn requires_admin(cmd: &Commands) -> bool {
 
         // On Windows, tray needs admin upfront (spawns daemon directly)
         #[cfg(windows)]
-        Commands::Tray => true,
+        Commands::Tray { .. } => true,
         #[cfg(not(windows))]
-        Commands::Tray => false,
+        Commands::Tray { .. } => false,
         _ => false,
     }
 }
@@ -209,7 +177,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             match &cli.command {
                 Commands::Connect { .. } => "connect",
                 Commands::Disconnect => "disconnect",
-                Commands::Tray => "tray",
+                Commands::Tray { .. } => "tray",
                 _ => "",
             }
         );
@@ -317,7 +285,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 std::process::exit(1);
             }
         },
-        Commands::Tray => {
+        Commands::Tray { launched_at_login } => {
             // On Windows, detach from console by respawning hidden
             #[cfg(windows)]
             {
@@ -334,6 +302,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
                     let mut cmd = Command::new(&exe);
                     cmd.arg("tray");
+                    if launched_at_login {
+                        cmd.arg("--launched-at-login");
+                    }
                     cmd.env("PMACS_VPN_TRAY_HIDDEN", "1");
                     cmd.stdin(Stdio::null());
                     cmd.stdout(Stdio::null());
@@ -358,7 +329,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
 
             info!("Starting system tray mode...");
-            run_tray_mode().await;
+            run_tray_mode(launched_at_login).await;
         }
     }
 
@@ -402,7 +373,22 @@ struct TrayStartupConfig {
     show_setup_required: bool,
 }
 
-fn load_tray_startup_config() -> TrayStartupConfig {
+fn is_truthy_env_var(name: &str) -> bool {
+    std::env::var(name)
+        .map(|v| {
+            matches!(
+                v.trim().to_ascii_lowercase().as_str(),
+                "1" | "true" | "yes" | "on"
+            )
+        })
+        .unwrap_or(false)
+}
+
+fn is_login_autostart_launch(cli_flag: bool) -> bool {
+    cli_flag || is_truthy_env_var("PMACS_VPN_LAUNCHED_AT_LOGIN")
+}
+
+fn load_tray_startup_config(launched_at_login: bool) -> TrayStartupConfig {
     let config_path = get_config_path();
     if !config_path.exists() {
         return TrayStartupConfig {
@@ -414,7 +400,28 @@ fn load_tray_startup_config() -> TrayStartupConfig {
     }
 
     match pmacs_vpn::Config::load(&config_path) {
-        Ok(config) => {
+        Ok(mut config) => {
+            let mut startup_enabled = pmacs_vpn::startup::is_start_at_login_enabled();
+            if startup_enabled && !config.preferences.start_at_login {
+                warn!(
+                    "Found stale start-at-login registration while config disables it; removing stale startup entry"
+                );
+                match pmacs_vpn::startup::disable_start_at_login() {
+                    Ok(()) => {
+                        startup_enabled = false;
+                        info!("Removed stale start-at-login registration");
+                    }
+                    Err(e) => warn!("Failed to remove stale start-at-login registration: {}", e),
+                }
+            }
+
+            if config.preferences.start_at_login != startup_enabled {
+                config.preferences.start_at_login = startup_enabled;
+                if let Err(e) = config.save(&config_path) {
+                    warn!("Failed to sync start_at_login preference to config: {}", e);
+                }
+            }
+
             let has_cached_password = config
                 .vpn
                 .username
@@ -422,8 +429,13 @@ fn load_tray_startup_config() -> TrayStartupConfig {
                 .and_then(|username| pmacs_vpn::get_password(username))
                 .is_some();
 
+            let auto_connect_enabled = config.preferences.auto_connect && has_cached_password;
+            if launched_at_login && auto_connect_enabled {
+                info!("Skipping auto-connect for login/autostart tray launch");
+            }
+
             TrayStartupConfig {
-                auto_connect: config.preferences.auto_connect && has_cached_password,
+                auto_connect: auto_connect_enabled && !launched_at_login,
                 save_password: config.preferences.save_password,
                 duo_method: config.preferences.duo_method,
                 show_setup_required: !has_cached_password,
@@ -835,13 +847,14 @@ fn spawn_tray_health_monitor(
 
 fn start_tray_services(
     rt: &tokio::runtime::Handle,
+    launched_at_login: bool,
 ) -> (
     pmacs_vpn::tray::TrayApp,
     std::sync::mpsc::Sender<pmacs_vpn::tray::VpnStatus>,
 ) {
     use pmacs_vpn::tray::TrayApp;
 
-    let startup = load_tray_startup_config();
+    let startup = load_tray_startup_config(launched_at_login);
     if startup.show_setup_required {
         notifications::notify_setup_required();
     }
@@ -859,14 +872,15 @@ fn start_tray_services(
 }
 
 /// Run the VPN with system tray GUI.
-async fn run_tray_mode() {
+async fn run_tray_mode(launched_at_login: bool) {
     let _ = ctrlc::set_handler(move || {
         cleanup_vpn_on_exit();
         std::process::exit(0);
     });
 
     let rt = tokio::runtime::Handle::current();
-    let (app, status_tx) = start_tray_services(&rt);
+    let launched_at_login = is_login_autostart_launch(launched_at_login);
+    let (app, status_tx) = start_tray_services(&rt, launched_at_login);
     initialize_tray_status(&status_tx).await;
 
     #[cfg(target_os = "macos")]

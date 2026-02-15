@@ -28,6 +28,7 @@ sudo ./target/debug/pmacs-vpn disconnect
 Tray behavior on macOS:
 - Connect/Reconnect/Disconnect now work from the tray like Windows.
 - First connect/reconnect may show a macOS admin prompt (AppleScript elevation).
+- Login auto-start opens tray only; it does not auto-connect (avoids repeated password prompts at login).
 - Use tray menu `macOS Permissions` to view Accessibility/Input Monitoring diagnostics.
 
 ### Optional: Touch ID for sudo (better UX for non-tray CLI flows)
@@ -54,6 +55,7 @@ Tray behavior on Windows:
 - `tray` relaunches itself hidden (no console window).
 - Connect/Reconnect/Disconnect work from tray.
 - `Start with Windows` menu option controls auto-start registry entry.
+- Login auto-start opens tray only; it does not auto-connect.
 
 ## Background CLI mode (both platforms)
 
@@ -112,7 +114,8 @@ hosts = ["prometheus.pmacs.upenn.edu"]  # hosts to route through VPN
 [preferences]
 save_password = true          # store password in OS keychain
 duo_method = "push"           # push, sms, call, or passcode
-auto_connect = true           # connect automatically when tray starts
+start_at_login = false        # start tray at OS login
+auto_connect = true           # auto-connect on manual tray launch (not on login auto-start)
 auto_reconnect = true         # reconnect if VPN drops unexpectedly
 max_reconnect_attempts = 3    # give up after N failed reconnects
 reconnect_delay_secs = 5      # base delay between reconnect attempts

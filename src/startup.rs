@@ -11,8 +11,8 @@ use thiserror::Error;
 use windows::Win32::Foundation::ERROR_SUCCESS;
 #[cfg(windows)]
 use windows::Win32::System::Registry::{
-    RegCloseKey, RegDeleteValueW, RegOpenKeyExW, RegQueryValueExW, RegSetValueExW,
-    HKEY, HKEY_CURRENT_USER, KEY_READ, KEY_WRITE, REG_SZ,
+    HKEY, HKEY_CURRENT_USER, KEY_READ, KEY_WRITE, REG_SZ, RegCloseKey, RegDeleteValueW,
+    RegOpenKeyExW, RegQueryValueExW, RegSetValueExW,
 };
 
 #[cfg(windows)]
@@ -79,8 +79,8 @@ pub fn enable_start_at_login() -> Result<(), StartupError> {
     let exe_path = std::env::current_exe()
         .map_err(|e| StartupError::Other(format!("Failed to get exe path: {}", e)))?;
 
-    // Command: "path\to\pmacs-vpn.exe" tray
-    let command = format!("\"{}\" tray", exe_path.display());
+    // Command: "path\to\pmacs-vpn.exe" tray --launched-at-login
+    let command = format!("\"{}\" tray --launched-at-login", exe_path.display());
 
     unsafe {
         let subkey = to_wide(r"Software\Microsoft\Windows\CurrentVersion\Run");
@@ -95,15 +95,16 @@ pub fn enable_start_at_login() -> Result<(), StartupError> {
         );
 
         if result != ERROR_SUCCESS {
-            return Err(StartupError::Other(format!("Failed to open registry key: {:?}", result)));
+            return Err(StartupError::Other(format!(
+                "Failed to open registry key: {:?}",
+                result
+            )));
         }
 
         let value_name = to_wide(APP_NAME);
         let value_data = to_wide(&command);
-        let value_bytes: &[u8] = std::slice::from_raw_parts(
-            value_data.as_ptr() as *const u8,
-            value_data.len() * 2,
-        );
+        let value_bytes: &[u8] =
+            std::slice::from_raw_parts(value_data.as_ptr() as *const u8, value_data.len() * 2);
 
         let result = RegSetValueExW(
             hkey,
@@ -115,7 +116,10 @@ pub fn enable_start_at_login() -> Result<(), StartupError> {
 
         let _ = RegCloseKey(hkey);
         if result != ERROR_SUCCESS {
-            return Err(StartupError::Other(format!("Failed to set registry value: {:?}", result)));
+            return Err(StartupError::Other(format!(
+                "Failed to set registry value: {:?}",
+                result
+            )));
         }
 
         tracing::info!("Enabled start at login (Windows registry)");
@@ -139,19 +143,22 @@ pub fn disable_start_at_login() -> Result<(), StartupError> {
         );
 
         if result != ERROR_SUCCESS {
-            return Err(StartupError::Other(format!("Failed to open registry key: {:?}", result)));
+            return Err(StartupError::Other(format!(
+                "Failed to open registry key: {:?}",
+                result
+            )));
         }
 
         let value_name = to_wide(APP_NAME);
-        let result = RegDeleteValueW(
-            hkey,
-            PCWSTR::from_raw(value_name.as_ptr()),
-        );
+        let result = RegDeleteValueW(hkey, PCWSTR::from_raw(value_name.as_ptr()));
 
         let _ = RegCloseKey(hkey);
         // Ignore "not found" error (2 = ERROR_FILE_NOT_FOUND)
         if result != ERROR_SUCCESS && result.0 != 2 {
-            return Err(StartupError::Other(format!("Failed to delete registry value: {:?}", result)));
+            return Err(StartupError::Other(format!(
+                "Failed to delete registry value: {:?}",
+                result
+            )));
         }
 
         tracing::info!("Disabled start at login (Windows registry)");
@@ -181,7 +188,8 @@ pub fn enable_start_at_login() -> Result<(), StartupError> {
     let exe_path = std::env::current_exe()
         .map_err(|e| StartupError::Other(format!("Could not get executable path: {}", e)))?;
 
-    let plist_content = format!(r#"<?xml version="1.0" encoding="UTF-8"?>
+    let plist_content = format!(
+        r#"<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
@@ -191,14 +199,22 @@ pub fn enable_start_at_login() -> Result<(), StartupError> {
     <array>
         <string>{}</string>
         <string>tray</string>
+        <string>--launched-at-login</string>
     </array>
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PMACS_VPN_LAUNCHED_AT_LOGIN</key>
+        <string>1</string>
+    </dict>
     <key>RunAtLoad</key>
     <true/>
     <key>KeepAlive</key>
     <false/>
 </dict>
 </plist>
-"#, exe_path.display());
+"#,
+        exe_path.display()
+    );
 
     // Create LaunchAgents directory if needed
     if let Some(parent) = plist_path.parent() {
@@ -268,7 +284,7 @@ pub fn enable_start_at_login() -> Result<(), StartupError> {
 Type=Application
 Name=PMACS VPN
 Comment=Split-tunnel VPN for PMACS
-Exec={} tray
+Exec={} tray --launched-at-login
 Icon=network-vpn
 Terminal=false
 Categories=Network;
