@@ -974,24 +974,12 @@ fn spawn_daemon_via_macos_elevation(
 }
 
 #[cfg(target_os = "macos")]
-fn launchd_plist_is_current(exe: &std::path::Path, working_dir: &std::path::Path) -> bool {
-    let plist = match std::fs::read_to_string(pmacs_vpn::launchd::DAEMON_PLIST_PATH) {
-        Ok(content) => content,
-        Err(_) => return false,
-    };
-
-    let exe_str = exe.display().to_string();
-    let cwd_str = working_dir.display().to_string();
-    plist.contains(&exe_str) && plist.contains(&cwd_str)
-}
-
-#[cfg(target_os = "macos")]
 fn spawn_daemon_via_launchd(
     exe: &std::path::Path,
 ) -> Result<u32, Box<dyn std::error::Error + Send + Sync>> {
     let cwd = std::env::current_dir()?;
-    let needs_install =
-        !pmacs_vpn::launchd::is_daemon_installed() || !launchd_plist_is_current(exe, &cwd);
+    let needs_install = !pmacs_vpn::launchd::is_daemon_installed()
+        || !pmacs_vpn::launchd::is_daemon_plist_current(exe, &cwd);
 
     if needs_install {
         info!("Installing privileged launchd daemon (one-time setup/update)");
@@ -1012,6 +1000,23 @@ fn spawn_daemon_via_launchd(
     }
 
     Ok(0)
+}
+
+#[cfg(target_os = "macos")]
+fn launchd_trigger_socket_owner() -> Option<(u32, u32)> {
+    use std::os::unix::fs::MetadataExt;
+
+    let metadata = match std::fs::metadata(pmacs_vpn::launchd::TRIGGER_FILE) {
+        Ok(m) => m,
+        Err(e) => {
+            debug!("No launchd trigger metadata available: {}", e);
+            return None;
+        }
+    };
+
+    let owner = (metadata.uid(), metadata.gid());
+    let _ = std::fs::remove_file(pmacs_vpn::launchd::TRIGGER_FILE);
+    Some(owner)
 }
 
 /// Spawn VPN as a detached background process (daemon mode)
@@ -1653,6 +1658,9 @@ async fn connect_vpn_with_token(token: AuthToken) -> Result<(), Box<dyn std::err
         .clone()
         .unwrap_or_else(pmacs_vpn::ipc::ipc_path);
 
+    #[cfg(target_os = "macos")]
+    let socket_owner = launchd_trigger_socket_owner();
+
     // Get tunnel config using the auth cookie
     let tunnel_config = gp::auth::getconfig_with_cookie(
         &token.gateway,
@@ -1738,6 +1746,10 @@ async fn connect_vpn_with_token(token: AuthToken) -> Result<(), Box<dyn std::err
 
     // Start IPC server for tray communication
     let daemon_state = DaemonState::new(tun_name, gateway_ip, state.connected_at.clone());
+    #[cfg(target_os = "macos")]
+    let (ipc_server, mut ipc_shutdown_rx) =
+        IpcServer::new_with_owner(ipc_path.clone(), daemon_state, socket_owner);
+    #[cfg(not(target_os = "macos"))]
     let (ipc_server, mut ipc_shutdown_rx) = IpcServer::new(ipc_path.clone(), daemon_state);
 
     // Run IPC server in background
