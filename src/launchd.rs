@@ -89,13 +89,19 @@ pub fn install_and_start_daemon(exe_path: &Path, working_dir: &Path) -> Result<(
 
     // Build the shell command that will run with admin privileges
     let shell_cmd = format!(
-        r#"cat > {} << 'PLIST_EOF'
+        r#"launchctl unload {} 2>/dev/null
+cat > {} << 'PLIST_EOF'
 {}
 PLIST_EOF
 chown root:wheel {}
 chmod 644 {}
 launchctl load -w {}"#,
-        DAEMON_PLIST_PATH, plist_content, DAEMON_PLIST_PATH, DAEMON_PLIST_PATH, DAEMON_PLIST_PATH
+        DAEMON_PLIST_PATH,
+        DAEMON_PLIST_PATH,
+        plist_content,
+        DAEMON_PLIST_PATH,
+        DAEMON_PLIST_PATH,
+        DAEMON_PLIST_PATH
     );
 
     let escaped_shell_cmd = applescript_escape(&shell_cmd);
@@ -105,23 +111,17 @@ launchctl load -w {}"#,
         escaped_shell_cmd
     );
 
-    debug!("Executing osascript for daemon installation (non-blocking)");
-
-    // Spawn osascript without waiting - osascript's "with administrator privileges"
-    // blocks until all child processes exit, so we can't wait for it.
-    // Instead, we spawn it and let the caller poll for connection success.
-    use std::process::Stdio;
-
-    Command::new("osascript")
+    debug!("Executing osascript for daemon installation");
+    let status = Command::new("osascript")
         .arg("-e")
         .arg(&applescript)
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()
-        .map_err(|e| format!("Failed to spawn osascript: {}", e))?;
+        .status()
+        .map_err(|e| format!("Failed to execute osascript: {}", e))?;
+    if !status.success() {
+        return Err("LaunchDaemon installation was cancelled or failed".to_string());
+    }
 
-    info!("LaunchDaemon installation started (spawned osascript)");
+    info!("LaunchDaemon installation completed");
     Ok(())
 }
 
@@ -150,21 +150,17 @@ pub fn stop_and_uninstall_daemon() -> Result<(), String> {
         escaped_shell_cmd
     );
 
-    debug!("Executing osascript for daemon uninstallation (non-blocking)");
-
-    // Spawn osascript without waiting - same reason as install
-    use std::process::Stdio;
-
-    Command::new("osascript")
+    debug!("Executing osascript for daemon uninstallation");
+    let status = Command::new("osascript")
         .arg("-e")
         .arg(&applescript)
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()
-        .map_err(|e| format!("Failed to spawn osascript: {}", e))?;
+        .status()
+        .map_err(|e| format!("Failed to execute osascript: {}", e))?;
+    if !status.success() {
+        return Err("LaunchDaemon uninstallation was cancelled or failed".to_string());
+    }
 
-    info!("LaunchDaemon uninstallation started (spawned osascript)");
+    info!("LaunchDaemon uninstallation completed");
     Ok(())
 }
 

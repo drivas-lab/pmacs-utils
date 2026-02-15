@@ -973,6 +973,47 @@ fn spawn_daemon_via_macos_elevation(
     Ok(0)
 }
 
+#[cfg(target_os = "macos")]
+fn launchd_plist_is_current(exe: &std::path::Path, working_dir: &std::path::Path) -> bool {
+    let plist = match std::fs::read_to_string(pmacs_vpn::launchd::DAEMON_PLIST_PATH) {
+        Ok(content) => content,
+        Err(_) => return false,
+    };
+
+    let exe_str = exe.display().to_string();
+    let cwd_str = working_dir.display().to_string();
+    plist.contains(&exe_str) && plist.contains(&cwd_str)
+}
+
+#[cfg(target_os = "macos")]
+fn spawn_daemon_via_launchd(
+    exe: &std::path::Path,
+) -> Result<u32, Box<dyn std::error::Error + Send + Sync>> {
+    let cwd = std::env::current_dir()?;
+    let needs_install =
+        !pmacs_vpn::launchd::is_daemon_installed() || !launchd_plist_is_current(exe, &cwd);
+
+    if needs_install {
+        info!("Installing privileged launchd daemon (one-time setup/update)");
+        pmacs_vpn::launchd::install_and_start_daemon(exe, &cwd).map_err(std::io::Error::other)?;
+    }
+
+    pmacs_vpn::launchd::trigger_daemon_start().map_err(std::io::Error::other)?;
+
+    // Best-effort PID discovery for CLI output.
+    for _ in 0..30 {
+        if let Ok(Some(state)) = pmacs_vpn::VpnState::load()
+            && let Some(pid) = state.pid
+            && state.is_daemon_running()
+        {
+            return Ok(pid);
+        }
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+
+    Ok(0)
+}
+
 /// Spawn VPN as a detached background process (daemon mode)
 /// Does authentication FIRST in parent, then passes token to child
 async fn spawn_daemon(
@@ -1124,8 +1165,17 @@ async fn spawn_daemon(
 
     #[cfg(target_os = "macos")]
     if !is_admin() {
-        info!("Spawning daemon via macOS administrator prompt");
-        return spawn_daemon_via_macos_elevation(&exe);
+        info!("Spawning daemon via macOS LaunchDaemon");
+        return match spawn_daemon_via_launchd(&exe) {
+            Ok(pid) => Ok(pid),
+            Err(e) => {
+                warn!(
+                    "LaunchDaemon startup failed: {}. Falling back to direct elevation prompt.",
+                    e
+                );
+                spawn_daemon_via_macos_elevation(&exe)
+            }
+        };
     }
 
     let mut cmd = Command::new(&exe);
