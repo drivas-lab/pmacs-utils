@@ -90,6 +90,7 @@ pub fn install_and_start_daemon(exe_path: &Path, working_dir: &Path) -> Result<(
     // Build the shell command that will run with admin privileges
     let shell_cmd = format!(
         r#"launchctl unload {} 2>/dev/null
+rm -f {}
 cat > {} << 'PLIST_EOF'
 {}
 PLIST_EOF
@@ -97,6 +98,7 @@ chown root:wheel {}
 chmod 644 {}
 launchctl load -w {}"#,
         DAEMON_PLIST_PATH,
+        TRIGGER_FILE,
         DAEMON_PLIST_PATH,
         plist_content,
         DAEMON_PLIST_PATH,
@@ -139,8 +141,8 @@ pub fn stop_and_uninstall_daemon() -> Result<(), String> {
     // Build the shell command that will run with admin privileges
     // Use 2>/dev/null to ignore errors if daemon is not loaded
     let shell_cmd = format!(
-        r#"launchctl unload {} 2>/dev/null; rm -f {}"#,
-        DAEMON_PLIST_PATH, DAEMON_PLIST_PATH
+        r#"launchctl unload {} 2>/dev/null; rm -f {}; rm -f {}"#,
+        DAEMON_PLIST_PATH, DAEMON_PLIST_PATH, TRIGGER_FILE
     );
 
     let escaped_shell_cmd = applescript_escape(&shell_cmd);
@@ -172,10 +174,22 @@ pub fn is_daemon_installed() -> bool {
     Path::new(DAEMON_PLIST_PATH).exists()
 }
 
+/// Check whether installed daemon plist matches current executable and working dir.
+pub fn is_daemon_plist_current(exe_path: &Path, working_dir: &Path) -> bool {
+    let actual = match std::fs::read_to_string(DAEMON_PLIST_PATH) {
+        Ok(v) => v,
+        Err(_) => return false,
+    };
+
+    let expected = generate_daemon_plist(exe_path, working_dir);
+    actual == expected
+}
+
 /// Trigger the daemon to start by touching the trigger file
 ///
 /// launchd watches this file and starts the daemon when it changes.
-/// This requires NO privileges - any user can touch the file.
+/// This requires NO privileges. The trigger file owner is later used to
+/// assign IPC socket ownership back to the tray user.
 pub fn trigger_daemon_start() -> Result<(), String> {
     use std::fs::OpenOptions;
 

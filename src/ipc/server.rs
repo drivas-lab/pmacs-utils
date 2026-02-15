@@ -66,17 +66,46 @@ pub struct IpcServer {
     state: Arc<RwLock<DaemonState>>,
     shutdown_tx: broadcast::Sender<()>,
     ipc_path: String,
+    #[cfg(not(windows))]
+    socket_owner: Option<(u32, u32)>,
 }
 
 impl IpcServer {
     /// Create a new IPC server with the given daemon state
     pub fn new(ipc_path: String, state: DaemonState) -> (Self, broadcast::Receiver<()>) {
+        #[cfg(windows)]
+        {
+            let (shutdown_tx, shutdown_rx) = broadcast::channel(1);
+
+            let server = Self {
+                state: Arc::new(RwLock::new(state)),
+                shutdown_tx,
+                ipc_path,
+            };
+
+            (server, shutdown_rx)
+        }
+
+        #[cfg(not(windows))]
+        {
+            Self::new_with_owner(ipc_path, state, None)
+        }
+    }
+
+    /// Create a new IPC server with explicit Unix socket owner.
+    #[cfg(not(windows))]
+    pub fn new_with_owner(
+        ipc_path: String,
+        state: DaemonState,
+        socket_owner: Option<(u32, u32)>,
+    ) -> (Self, broadcast::Receiver<()>) {
         let (shutdown_tx, shutdown_rx) = broadcast::channel(1);
 
         let server = Self {
             state: Arc::new(RwLock::new(state)),
             shutdown_tx,
             ipc_path,
+            socket_owner,
         };
 
         (server, shutdown_rx)
@@ -151,15 +180,20 @@ impl IpcServer {
             let perms = std::fs::Permissions::from_mode(0o600);
             let _ = std::fs::set_permissions(&self.ipc_path, perms);
 
-            // If tray launched daemon through elevation (macOS), transfer socket
-            // ownership to the tray user so non-root tray can talk to root daemon.
-            let uid = std::env::var("PMACS_VPN_IPC_UID")
-                .ok()
-                .and_then(|v| v.parse::<u32>().ok());
-            let gid = std::env::var("PMACS_VPN_IPC_GID")
-                .ok()
-                .and_then(|v| v.parse::<u32>().ok());
-            if let (Some(uid), Some(gid)) = (uid, gid)
+            // If daemon started with a known tray user owner, transfer socket
+            // ownership so non-root tray can communicate with root daemon.
+            // Fall back to env-based owner for backward compatibility.
+            let owner = self.socket_owner.or_else(|| {
+                let uid = std::env::var("PMACS_VPN_IPC_UID")
+                    .ok()
+                    .and_then(|v| v.parse::<u32>().ok());
+                let gid = std::env::var("PMACS_VPN_IPC_GID")
+                    .ok()
+                    .and_then(|v| v.parse::<u32>().ok());
+                uid.zip(gid)
+            });
+
+            if let Some((uid, gid)) = owner
                 && let Err(e) = chown(
                     std::path::Path::new(&self.ipc_path),
                     Some(Uid::from_raw(uid)),
