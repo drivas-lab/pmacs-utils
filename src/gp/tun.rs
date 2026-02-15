@@ -167,7 +167,6 @@ fn ensure_wintun_dll() -> Result<(), TunError> {
     Ok(())
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;

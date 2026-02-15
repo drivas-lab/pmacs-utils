@@ -187,7 +187,11 @@ mod tests {
 
         // Check type field: data packets must have 0x01 at byte 8
         assert_eq!(encoded[8], 0x01, "Data packets must have type byte 0x01");
-        assert_eq!(&encoded[9..16], &[0u8; 7], "Remaining type bytes must be zero");
+        assert_eq!(
+            &encoded[9..16],
+            &[0u8; 7],
+            "Remaining type bytes must be zero"
+        );
 
         // Decode
         let decoded = GpPacket::decode(&encoded).unwrap();
@@ -219,7 +223,11 @@ mod tests {
         assert_eq!(u16::from_be_bytes([encoded[6], encoded[7]]), 0);
 
         // Type field should be all zeros for keepalive
-        assert_eq!(&encoded[8..16], &[0u8; 8], "Keepalive type bytes must be zero");
+        assert_eq!(
+            &encoded[8..16],
+            &[0u8; 8],
+            "Keepalive type bytes must be zero"
+        );
 
         let decoded = GpPacket::decode(&encoded).unwrap();
         assert!(decoded.is_keepalive());

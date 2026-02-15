@@ -95,11 +95,7 @@ PLIST_EOF
 chown root:wheel {}
 chmod 644 {}
 launchctl load -w {}"#,
-        DAEMON_PLIST_PATH,
-        plist_content,
-        DAEMON_PLIST_PATH,
-        DAEMON_PLIST_PATH,
-        DAEMON_PLIST_PATH
+        DAEMON_PLIST_PATH, plist_content, DAEMON_PLIST_PATH, DAEMON_PLIST_PATH, DAEMON_PLIST_PATH
     );
 
     let escaped_shell_cmd = applescript_escape(&shell_cmd);
@@ -239,10 +235,7 @@ mod tests {
         assert_eq!(applescript_escape("hello"), "hello");
         assert_eq!(applescript_escape("hello\"world"), "hello\\\"world");
         assert_eq!(applescript_escape("path\\to\\file"), "path\\\\to\\\\file");
-        assert_eq!(
-            applescript_escape("path\\to\"file"),
-            "path\\\\to\\\"file"
-        );
+        assert_eq!(applescript_escape("path\\to\"file"), "path\\\\to\\\"file");
     }
 
     #[test]

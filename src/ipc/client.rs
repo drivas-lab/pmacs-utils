@@ -4,7 +4,7 @@
 //! and provides methods to ping, get status, and request disconnect.
 
 use super::protocol::{
-    ipc_path, read_message, write_message, DaemonResponse, DaemonStatus, TrayRequest,
+    DaemonResponse, DaemonStatus, TrayRequest, ipc_path, read_message, write_message,
 };
 use std::io;
 use std::time::Duration;
@@ -12,9 +12,9 @@ use tokio::time::timeout;
 use tracing::debug;
 
 #[cfg(windows)]
-use interprocess::local_socket::tokio::prelude::*;
-#[cfg(windows)]
 use interprocess::local_socket::GenericFilePath;
+#[cfg(windows)]
+use interprocess::local_socket::tokio::prelude::*;
 
 #[cfg(not(windows))]
 use tokio::net::UnixStream;
@@ -96,10 +96,18 @@ impl IpcClient {
         debug!("Sending IPC request: {:?}", request);
 
         // Connect with timeout
-        let name = self.ipc_path.clone().to_fs_name::<GenericFilePath>()
+        let name = self
+            .ipc_path
+            .clone()
+            .to_fs_name::<GenericFilePath>()
             .map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e.to_string()))?;
 
-        let stream = match timeout(IPC_TIMEOUT, interprocess::local_socket::tokio::Stream::connect(name)).await {
+        let stream = match timeout(
+            IPC_TIMEOUT,
+            interprocess::local_socket::tokio::Stream::connect(name),
+        )
+        .await
+        {
             Ok(Ok(s)) => s,
             Ok(Err(e)) => {
                 debug!("Failed to connect to IPC: {}", e);

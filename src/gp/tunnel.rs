@@ -49,7 +49,7 @@ const KEEPALIVE_INTERVAL_SECS: u64 = 30;
 const AGGRESSIVE_KEEPALIVE_SECS: u64 = 10;
 const DEFAULT_INBOUND_TIMEOUT_SECS: u64 = 45; // Faster dead tunnel detection (was 90s)
 const SESSION_LIFETIME_SECS: u64 = 16 * 60 * 60; // 16 hours
-const SESSION_WARNING_SECS: u64 = 15 * 60 * 60;  // Warn at 15 hours
+const SESSION_WARNING_SECS: u64 = 15 * 60 * 60; // Warn at 15 hours
 
 /// SSL tunnel connection to GlobalProtect gateway
 pub struct SslTunnel {
@@ -114,7 +114,10 @@ impl SslTunnel {
         info!("TUN device created: {}", tun.name());
 
         let keepalive_secs = if aggressive_keepalive {
-            info!("Using aggressive keepalive ({}s)", AGGRESSIVE_KEEPALIVE_SECS);
+            info!(
+                "Using aggressive keepalive ({}s)",
+                AGGRESSIVE_KEEPALIVE_SECS
+            );
             AGGRESSIVE_KEEPALIVE_SECS
         } else {
             KEEPALIVE_INTERVAL_SECS
@@ -135,7 +138,9 @@ impl SslTunnel {
         };
 
         // 4. Send tunnel request
-        tunnel.send_tunnel_request(gateway, username, auth_cookie).await?;
+        tunnel
+            .send_tunnel_request(gateway, username, auth_cookie)
+            .await?;
 
         // 5. Wait for "START_TUNNEL" response
         tunnel.wait_for_start().await?;
@@ -221,7 +226,9 @@ impl SslTunnel {
                 self.last_warning_hour = warning_key;
                 warn!(
                     "Session expires in {} minutes (connected {}h{}m)",
-                    remaining_mins, hours, mins % 60
+                    remaining_mins,
+                    hours,
+                    mins % 60
                 );
                 eprintln!(
                     "\n*** WARNING: VPN session expires in {} minutes. Reconnect soon. ***\n",

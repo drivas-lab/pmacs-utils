@@ -177,8 +177,12 @@ pub async fn prelogin(gateway: &str) -> Result<PreloginResponse, AuthError> {
 
     Ok(PreloginResponse {
         auth_method,
-        label_username: prelogin.username_label.unwrap_or_else(|| "Username".to_string()),
-        label_password: prelogin.password_label.unwrap_or_else(|| "Password".to_string()),
+        label_username: prelogin
+            .username_label
+            .unwrap_or_else(|| "Username".to_string()),
+        label_password: prelogin
+            .password_label
+            .unwrap_or_else(|| "Password".to_string()),
         saml_request: prelogin.saml_auth_method,
     })
 }
@@ -199,12 +203,10 @@ fn parse_challenge(body: &str) -> Option<ChallengeResponse> {
     }
 
     // Extract inputStr value using regex-like parsing
-    let input_str = body
-        .find("inputStr.value = \"")
-        .and_then(|start| {
-            let rest = &body[start + 18..];
-            rest.find('"').map(|end| rest[..end].to_string())
-        })?;
+    let input_str = body.find("inputStr.value = \"").and_then(|start| {
+        let rest = &body[start + 18..];
+        rest.find('"').map(|end| rest[..end].to_string())
+    })?;
 
     // Extract message
     let message = body
@@ -221,7 +223,11 @@ fn parse_challenge(body: &str) -> Option<ChallengeResponse> {
 /// Parse JNLP login response
 /// Handles both labeled format: (auth-cookie), value, (portal), value, ...
 /// And positional format: empty, cookie, persistent-cookie, gateway, user, profile, vsys, domain, ...
-fn parse_jnlp_response(body: &str, username: &str, gateway: &str) -> Result<LoginResponse, AuthError> {
+fn parse_jnlp_response(
+    body: &str,
+    username: &str,
+    gateway: &str,
+) -> Result<LoginResponse, AuthError> {
     let jnlp: JnlpXml = quick_xml::de::from_str(body)
         .map_err(|e| AuthError::AuthFailed(format!("Invalid login response: {}", e)))?;
 
@@ -258,7 +264,8 @@ fn parse_jnlp_response(body: &str, username: &str, gateway: &str) -> Result<Logi
         }
 
         Ok(LoginResponse {
-            auth_cookie: auth_cookie.ok_or_else(|| AuthError::MissingField("auth-cookie".to_string()))?,
+            auth_cookie: auth_cookie
+                .ok_or_else(|| AuthError::MissingField("auth-cookie".to_string()))?,
             username: username.to_string(),
             domain: domain.unwrap_or_default(),
             portal: portal.unwrap_or_else(|| gateway.to_string()),
@@ -274,28 +281,35 @@ fn parse_jnlp_response(body: &str, username: &str, gateway: &str) -> Result<Logi
         // [5]: auth profile
         // [6]: vsys
         // [7]: domain
-        debug!("Parsing positional JNLP format with {} arguments", args.len());
+        debug!(
+            "Parsing positional JNLP format with {} arguments",
+            args.len()
+        );
 
         // Auth cookie is at index 1 (32 hex chars)
-        let auth_cookie = args.get(1)
+        let auth_cookie = args
+            .get(1)
             .filter(|s| !s.is_empty() && s.len() == 32 && s.chars().all(|c| c.is_ascii_hexdigit()))
             .cloned()
             .ok_or_else(|| AuthError::MissingField("auth-cookie at index 1".to_string()))?;
 
         // Gateway at index 3
-        let gateway_name = args.get(3)
+        let gateway_name = args
+            .get(3)
             .filter(|s| !s.is_empty())
             .cloned()
             .unwrap_or_else(|| gateway.to_string());
 
         // Username at index 4 (or use provided)
-        let user = args.get(4)
+        let user = args
+            .get(4)
             .filter(|s| !s.is_empty())
             .cloned()
             .unwrap_or_else(|| username.to_string());
 
         // Domain at index 7
-        let domain = args.get(7)
+        let domain = args
+            .get(7)
             .filter(|s| !s.is_empty())
             .cloned()
             .unwrap_or_default();
@@ -331,11 +345,19 @@ pub async fn login(
     password: &str,
     passcode: Option<&str>,
 ) -> Result<LoginResponse, AuthError> {
-    info!("Logging in as {} (passcode: {})", username, if passcode.is_some() { "provided" } else { "none" });
+    info!(
+        "Logging in as {} (passcode: {})",
+        username,
+        if passcode.is_some() {
+            "provided"
+        } else {
+            "none"
+        }
+    );
 
     let client = Client::builder()
         .danger_accept_invalid_certs(false)
-        .cookie_store(true)  // Maintain session cookies for MFA flow
+        .cookie_store(true) // Maintain session cookies for MFA flow
         .build()?;
 
     let url = format!("https://{}/ssl-vpn/login.esp", gateway);
@@ -350,9 +372,9 @@ pub async fn login(
     let params: HashMap<&str, String> = [
         ("user", username.to_string()),
         ("passwd", password.to_string()),
-        ("jnlpReady", "jnlpReady".to_string()),  // Required!
-        ("ok", "Login".to_string()),              // Required!
-        ("direct", "yes".to_string()),            // Required!
+        ("jnlpReady", "jnlpReady".to_string()), // Required!
+        ("ok", "Login".to_string()),            // Required!
+        ("direct", "yes".to_string()),          // Required!
         ("prot", "https:".to_string()),
         ("server", gateway.to_string()),
         ("computer", hostname.clone()),
@@ -382,15 +404,18 @@ pub async fn login(
         // Second request: send challenge token with passcode in passwd field
         // For DUO push, the server will block until the user approves
         let passcode = passcode.unwrap_or("push");
-        info!("Sending MFA response with passcode: {} (waiting for approval...)", passcode);
+        info!(
+            "Sending MFA response with passcode: {} (waiting for approval...)",
+            passcode
+        );
 
         let challenge_params: HashMap<&str, String> = [
             ("user", username.to_string()),
-            ("passwd", passcode.to_string()),  // Passcode goes in passwd field for MFA step
+            ("passwd", passcode.to_string()), // Passcode goes in passwd field for MFA step
             ("inputStr", challenge.input_str),
-            ("jnlpReady", "jnlpReady".to_string()),  // Required!
-            ("ok", "Login".to_string()),              // Required!
-            ("direct", "yes".to_string()),            // Required!
+            ("jnlpReady", "jnlpReady".to_string()), // Required!
+            ("ok", "Login".to_string()),            // Required!
+            ("direct", "yes".to_string()),          // Required!
             ("prot", "https:".to_string()),
             ("server", gateway.to_string()),
             ("computer", hostname.clone()),
@@ -498,12 +523,7 @@ fn parse_dns_servers(policy: &PolicyXml) -> Vec<IpAddr> {
     policy
         .dns
         .as_ref()
-        .map(|dns| {
-            dns.member
-                .iter()
-                .filter_map(|s| s.parse().ok())
-                .collect()
-        })
+        .map(|dns| dns.member.iter().filter_map(|s| s.parse().ok()).collect())
         .unwrap_or_default()
 }
 
@@ -568,10 +588,7 @@ async fn getconfig_impl(
         .parse()
         .map_err(|_| AuthError::InvalidResponse)?;
 
-    let internal_ip6 = policy
-        .ipv6_address
-        .as_ref()
-        .and_then(|s| s.parse().ok());
+    let internal_ip6 = policy.ipv6_address.as_ref().and_then(|s| s.parse().ok());
 
     let mtu = parse_mtu(&policy);
     let dns_servers = parse_dns_servers(&policy);
@@ -630,15 +647,7 @@ pub async fn getconfig_with_cookie(
 ) -> Result<TunnelConfig, AuthError> {
     info!("Getting tunnel configuration (daemon mode)");
 
-    getconfig_impl(
-        gateway,
-        username,
-        auth_cookie,
-        portal,
-        domain,
-        preferred_ip,
-    )
-    .await
+    getconfig_impl(gateway, username, auth_cookie, portal, domain, preferred_ip).await
 }
 
 #[cfg(test)]
