@@ -27,7 +27,8 @@ sudo ./target/debug/pmacs-vpn disconnect
 
 Tray behavior on macOS:
 - Connect/Reconnect/Disconnect now work from the tray like Windows.
-- First connect/reconnect may show a macOS admin prompt (AppleScript elevation).
+- First connect (or after binary path changes) may show a macOS admin prompt to install/update the privileged LaunchDaemon.
+- After that one-time setup, normal tray connect/reconnect should not prompt each time.
 - Login auto-start opens tray only; it does not auto-connect (avoids repeated password prompts at login).
 - Use tray menu `macOS Permissions` to view Accessibility/Input Monitoring diagnostics.
 
