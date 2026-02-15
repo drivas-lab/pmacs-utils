@@ -10,6 +10,22 @@ Written in Rust and pure spite.
 
 # Quickstart (Local Dev)
 
+## Quality Gate
+
+Run the local anti-drift gate before pushing:
+
+```bash
+./scripts/quality-gate.sh
+```
+
+Fast variant:
+
+```bash
+./scripts/quality-gate.sh --quick
+```
+
+See `QUALITY.md` for expected behavior invariants and review standards.
+
 ## macOS (menu-bar tray)
 
 ```bash
