@@ -56,6 +56,21 @@ pub enum VpnStatus {
     Error(String),
 }
 
+fn persist_start_at_login_preference(enabled: bool) -> Result<(), String> {
+    let config_path = crate::resolve_config_path();
+
+    let mut config = if config_path.exists() {
+        crate::Config::load(&config_path).map_err(|e| format!("Failed to load config: {}", e))?
+    } else {
+        crate::Config::default()
+    };
+
+    config.preferences.start_at_login = enabled;
+    config
+        .save(&config_path)
+        .map_err(|e| format!("Failed to save config: {}", e))
+}
+
 /// Custom event for the tray event loop
 enum UserEvent {
     TrayIcon(TrayIconEvent),
@@ -297,6 +312,9 @@ impl TrayApp {
                         match startup::toggle_startup() {
                             Ok(enabled) => {
                                 startup_item.set_checked(enabled);
+                                if let Err(e) = persist_start_at_login_preference(enabled) {
+                                    error!("Failed to persist start_at_login preference: {}", e);
+                                }
                                 info!("Startup {}", if enabled { "enabled" } else { "disabled" });
                             }
                             Err(e) => {

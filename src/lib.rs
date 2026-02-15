@@ -26,6 +26,6 @@ pub mod state;
 pub mod tray;
 pub mod vpn;
 
-pub use config::{Config, DuoMethod, Preferences, VpnConfig};
+pub use config::{Config, DuoMethod, Preferences, VpnConfig, resolve_config_path};
 pub use credentials::{delete_password, get_password, store_password};
 pub use state::{AuthToken, VpnState};
