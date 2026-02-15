@@ -9,7 +9,8 @@ use notify_rust::Notification;
 /// App ID for toast notifications
 /// Using PowerShell's AUMID for compatibility (custom app IDs require registration)
 #[cfg(windows)]
-const APP_ID: &str = "{1AC14E77-02E7-4E5D-B744-2EB1AE5198B7}\\WindowsPowerShell\\v1.0\\powershell.exe";
+const APP_ID: &str =
+    "{1AC14E77-02E7-4E5D-B744-2EB1AE5198B7}\\WindowsPowerShell\\v1.0\\powershell.exe";
 
 /// Show a toast notification
 #[allow(unused_variables)]

@@ -4,7 +4,7 @@
 //! to securely store VPN passwords. Falls back to file-based storage for
 //! headless servers where keyring is unavailable.
 
-use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
+use base64::{Engine, engine::general_purpose::STANDARD as BASE64};
 use keyring::Entry;
 use std::fs;
 use std::path::PathBuf;
@@ -22,18 +22,31 @@ fn credentials_file_path() -> Option<PathBuf> {
 
     // Fallback: check XDG_CONFIG_HOME directly
     if let Ok(xdg) = std::env::var("XDG_CONFIG_HOME") {
-        return Some(PathBuf::from(xdg).join("pmacs-vpn").join(CREDENTIALS_FILENAME));
+        return Some(
+            PathBuf::from(xdg)
+                .join("pmacs-vpn")
+                .join(CREDENTIALS_FILENAME),
+        );
     }
 
     // Fallback: use HOME/.config
     if let Ok(home) = std::env::var("HOME") {
-        return Some(PathBuf::from(home).join(".config").join("pmacs-vpn").join(CREDENTIALS_FILENAME));
+        return Some(
+            PathBuf::from(home)
+                .join(".config")
+                .join("pmacs-vpn")
+                .join(CREDENTIALS_FILENAME),
+        );
     }
 
     // Last resort on Unix
     #[cfg(unix)]
     if let Some(home) = dirs::home_dir() {
-        return Some(home.join(".config").join("pmacs-vpn").join(CREDENTIALS_FILENAME));
+        return Some(
+            home.join(".config")
+                .join("pmacs-vpn")
+                .join(CREDENTIALS_FILENAME),
+        );
     }
 
     None
@@ -69,8 +82,7 @@ fn store_password_file(username: &str, password: &str) -> Result<(), String> {
     }
 
     let encoded = encode_credentials(username, password);
-    fs::write(&path, &encoded)
-        .map_err(|e| format!("Failed to write credentials file: {}", e))?;
+    fs::write(&path, &encoded).map_err(|e| format!("Failed to write credentials file: {}", e))?;
 
     // Set restrictive permissions (Unix only)
     #[cfg(unix)]
@@ -179,20 +191,21 @@ pub fn get_password(username: &str) -> Option<String> {
 
     // Try keyring first
     match Entry::new(SERVICE_NAME, username) {
-        Ok(entry) => {
-            match entry.get_password() {
-                Ok(password) => {
-                    info!("Retrieved stored password from keychain for user: {}", username);
-                    return Some(password);
-                }
-                Err(keyring::Error::NoEntry) => {
-                    debug!("No keychain entry for user: {}", username);
-                }
-                Err(e) => {
-                    debug!("Keyring retrieval failed: {}", e);
-                }
+        Ok(entry) => match entry.get_password() {
+            Ok(password) => {
+                info!(
+                    "Retrieved stored password from keychain for user: {}",
+                    username
+                );
+                return Some(password);
             }
-        }
+            Err(keyring::Error::NoEntry) => {
+                debug!("No keychain entry for user: {}", username);
+            }
+            Err(e) => {
+                debug!("Keyring retrieval failed: {}", e);
+            }
+        },
         Err(e) => {
             debug!("Keyring entry creation failed: {}", e);
         }

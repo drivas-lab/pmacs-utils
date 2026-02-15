@@ -2,7 +2,7 @@
 //!
 //! Provides DNS resolution (system or VPN-specific) and route management.
 
-use crate::platform::{get_routing_manager, get_routing_manager_for_interface, PlatformError};
+use crate::platform::{PlatformError, get_routing_manager, get_routing_manager_for_interface};
 use std::net::{IpAddr, Ipv4Addr, SocketAddr, ToSocketAddrs, UdpSocket};
 use std::time::Duration;
 use thiserror::Error;
@@ -133,7 +133,10 @@ impl VpnRouter {
 
             match query_dns_server(&query, server_addr, if_index) {
                 Ok(ip) => {
-                    info!("VPN DNS resolved {} -> {} (via {})", hostname, ip, dns_server);
+                    info!(
+                        "VPN DNS resolved {} -> {} (via {})",
+                        hostname, ip, dns_server
+                    );
                     return Ok(IpAddr::V4(ip));
                 }
                 Err(e) => {
@@ -249,8 +252,7 @@ fn build_dns_query(hostname: &str) -> Vec<u8> {
 fn query_dns_server(
     query: &[u8],
     server: SocketAddr,
-    #[cfg_attr(not(windows), allow(unused_variables))]
-    interface_index: Option<u32>,
+    #[cfg_attr(not(windows), allow(unused_variables))] interface_index: Option<u32>,
 ) -> Result<Ipv4Addr, String> {
     let socket = UdpSocket::bind("0.0.0.0:0").map_err(|e| format!("bind failed: {}", e))?;
 
@@ -376,7 +378,10 @@ fn query_dns_server(
         return Ok(ip);
     }
 
-    Err(format!("unexpected answer type: {} length: {}", atype, rdlength))
+    Err(format!(
+        "unexpected answer type: {} length: {}",
+        atype, rdlength
+    ))
 }
 
 /// Bind a socket to a specific network interface on Windows using IP_UNICAST_IF
@@ -410,7 +415,10 @@ fn bind_socket_to_interface(socket: &UdpSocket, interface_index: u32) -> Result<
         return Err(format!("setsockopt IP_UNICAST_IF failed: {}", error));
     }
 
-    debug!("Bound socket to interface index {} via IP_UNICAST_IF", interface_index);
+    debug!(
+        "Bound socket to interface index {} via IP_UNICAST_IF",
+        interface_index
+    );
     Ok(())
 }
 
@@ -500,7 +508,10 @@ mod tests {
         let query = build_dns_query("example.com");
 
         // Verify header structure
-        assert!(query.len() >= 12, "Query should have at least 12 byte header");
+        assert!(
+            query.len() >= 12,
+            "Query should have at least 12 byte header"
+        );
 
         // Flags at bytes 2-3 should be 0x01 0x00 (standard query, RD=1)
         assert_eq!(query[2], 0x01);

@@ -56,6 +56,6 @@ pub mod client;
 pub mod protocol;
 pub mod server;
 
-pub use client::{daemon_is_alive, IpcClient};
-pub use protocol::{ipc_path, DaemonResponse, DaemonStatus, TrayRequest};
-pub use server::{cleanup_ipc, DaemonState, IpcServer};
+pub use client::{IpcClient, daemon_is_alive};
+pub use protocol::{DaemonResponse, DaemonStatus, TrayRequest, ipc_path};
+pub use server::{DaemonState, IpcServer, cleanup_ipc};

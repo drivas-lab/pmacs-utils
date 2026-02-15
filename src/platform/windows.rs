@@ -123,7 +123,10 @@ pub fn get_interface_index(name: &str) -> Option<u32> {
         return Some(idx);
     }
 
-    debug!("Could not find interface index for {} using any method", name);
+    debug!(
+        "Could not find interface index for {} using any method",
+        name
+    );
     None
 }
 
@@ -175,9 +178,10 @@ fn try_netsh_interface_index(name: &str) -> Option<u32> {
         if parts.len() >= 5 {
             let iface_name = parts[4..].join(" ").to_lowercase();
             if iface_name.contains(&name_lower)
-                && let Ok(idx) = parts[0].parse::<u32>() {
-                    debug!("Found interface {} with index {} via netsh", name, idx);
-                    return Some(idx);
+                && let Ok(idx) = parts[0].parse::<u32>()
+            {
+                debug!("Found interface {} with index {} via netsh", name, idx);
+                return Some(idx);
             }
         }
     }

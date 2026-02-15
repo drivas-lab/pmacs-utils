@@ -75,7 +75,10 @@ where
     if len > MAX_MESSAGE_SIZE {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
-            format!("Message too large: {} bytes (max {})", len, MAX_MESSAGE_SIZE),
+            format!(
+                "Message too large: {} bytes (max {})",
+                len, MAX_MESSAGE_SIZE
+            ),
         ));
     }
 
@@ -85,7 +88,10 @@ where
 
     // Deserialize
     serde_json::from_slice(&buf).map_err(|e| {
-        io::Error::new(io::ErrorKind::InvalidData, format!("JSON parse error: {}", e))
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("JSON parse error: {}", e),
+        )
     })
 }
 
