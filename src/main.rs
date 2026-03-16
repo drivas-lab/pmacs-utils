@@ -1510,6 +1510,7 @@ async fn connect_vpn(
             let dns_ip = dns_server.to_string();
             match router.add_ip_route(&dns_ip) {
                 Ok(_) => {
+                    state.add_dns_route(*dns_server);
                     info!("Added route to DNS server: {}", dns_ip);
                     println!("    Route to DNS: {}", dns_ip);
                 }
@@ -1709,8 +1710,11 @@ async fn connect_vpn_with_token(token: AuthToken) -> Result<(), Box<dyn std::err
     // Route to DNS servers first
     for dns_server in &dns_servers {
         let dns_ip = dns_server.to_string();
-        if let Err(e) = router.add_ip_route(&dns_ip) {
-            warn!("Failed to add route to DNS {}: {}", dns_ip, e);
+        match router.add_ip_route(&dns_ip) {
+            Ok(_) => state.add_dns_route(*dns_server),
+            Err(e) => {
+                warn!("Failed to add route to DNS {}: {}", dns_ip, e);
+            }
         }
     }
 
@@ -1851,6 +1855,7 @@ async fn disconnect_vpn() -> Result<(), Box<dyn std::error::Error>> {
 /// Clean up routes, hosts, and state
 async fn cleanup_vpn(state: &pmacs_vpn::VpnState) -> Result<(), Box<dyn std::error::Error>> {
     info!("Cleaning up VPN state...");
+    use std::collections::HashSet;
 
     // Remove hosts entries
     let hosts_mgr = HostsManager::new();
@@ -1860,12 +1865,13 @@ async fn cleanup_vpn(state: &pmacs_vpn::VpnState) -> Result<(), Box<dyn std::err
 
     // Remove routes using stored IPs (don't resolve - VPN may be down)
     let router = VpnRouter::new(state.gateway.to_string())?;
-    for route in &state.routes {
-        if let Err(e) = router.remove_ip_route(&route.ip.to_string()) {
-            error!(
-                "Failed to remove route for {} ({}): {}",
-                route.hostname, route.ip, e
-            );
+    let mut routes_to_remove: HashSet<std::net::IpAddr> =
+        state.routes.iter().map(|route| route.ip).collect();
+    routes_to_remove.extend(state.dns_routes.iter().copied());
+
+    for route_ip in routes_to_remove {
+        if let Err(e) = router.remove_ip_route(&route_ip.to_string()) {
+            error!("Failed to remove route for {}: {}", route_ip, e);
         }
     }
 
