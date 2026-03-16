@@ -52,6 +52,31 @@ fn credentials_file_path() -> Option<PathBuf> {
     None
 }
 
+fn file_credentials_forced() -> bool {
+    std::env::var("PMACS_VPN_FORCE_FILE_CREDENTIALS")
+        .map(|v| {
+            matches!(
+                v.trim().to_ascii_lowercase().as_str(),
+                "1" | "true" | "yes" | "on"
+            )
+        })
+        .unwrap_or(false)
+}
+
+fn should_persist_file_fallback(
+    force_file: bool,
+    existing_file: bool,
+    keyring_stored: bool,
+) -> bool {
+    force_file || existing_file || !keyring_stored
+}
+
+fn credentials_file_exists() -> bool {
+    credentials_file_path()
+        .map(|path| path.exists())
+        .unwrap_or(false)
+}
+
 /// Simple obfuscation for file storage (not encryption, but prevents casual viewing)
 /// Format: base64(username:base64(password))
 fn encode_credentials(username: &str, password: &str) -> String {
@@ -160,25 +185,36 @@ fn delete_password_file() -> Result<(), String> {
     Ok(())
 }
 
-/// Store a password securely in the OS credential manager AND file
-/// Always stores to both locations to ensure headless services can access it
+/// Store a password securely in the OS credential manager.
+///
+/// Backward compatibility:
+/// - Existing file-based installs keep getting their fallback file updated.
+/// - New installs only get a file fallback when keyring storage is unavailable,
+///   or when explicitly forced via PMACS_VPN_FORCE_FILE_CREDENTIALS=1.
 pub fn store_password(username: &str, password: &str) -> Result<(), String> {
-    // Always store to file first (for headless/systemd contexts)
-    store_password_file(username, password)?;
+    let existing_file = credentials_file_exists();
 
-    // Also try keyring (for interactive contexts)
-    match Entry::new(SERVICE_NAME, username) {
+    let keyring_stored = match Entry::new(SERVICE_NAME, username) {
         Ok(entry) => match entry.set_password(password) {
             Ok(()) => {
-                info!("Password also stored in keychain for user: {}", username);
+                info!("Password stored in keychain for user: {}", username);
+                true
             }
             Err(e) => {
-                debug!("Keyring storage failed (file fallback available): {}", e);
+                debug!("Keyring storage failed (file fallback may be used): {}", e);
+                false
             }
         },
         Err(e) => {
-            debug!("Keyring unavailable (file fallback available): {}", e);
+            debug!("Keyring unavailable (file fallback may be used): {}", e);
+            false
         }
+    };
+
+    if should_persist_file_fallback(file_credentials_forced(), existing_file, keyring_stored) {
+        store_password_file(username, password)?;
+    } else {
+        debug!("Skipping file credential write because keyring storage succeeded");
     }
 
     Ok(())
@@ -280,5 +316,13 @@ mod tests {
 
         // Verify deleted
         assert!(get_password(username).is_none());
+    }
+
+    #[test]
+    fn test_should_persist_file_fallback_logic() {
+        assert!(!should_persist_file_fallback(false, false, true));
+        assert!(should_persist_file_fallback(false, false, false));
+        assert!(should_persist_file_fallback(false, true, true));
+        assert!(should_persist_file_fallback(true, false, true));
     }
 }

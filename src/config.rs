@@ -152,6 +152,12 @@ impl Config {
     }
 
     pub fn save(&self, path: &PathBuf) -> Result<(), ConfigError> {
+        if let Some(parent) = path.parent()
+            && !parent.as_os_str().is_empty()
+        {
+            std::fs::create_dir_all(parent)?;
+        }
+
         let content = toml::to_string_pretty(self)?;
         std::fs::write(path, content)?;
         Ok(())
@@ -247,6 +253,23 @@ mod tests {
         assert_eq!(loaded.vpn.gateway, "custom.vpn.example.com");
         assert_eq!(loaded.vpn.protocol, "anyconnect");
         assert_eq!(loaded.hosts.len(), 2);
+    }
+
+    #[test]
+    fn test_save_creates_parent_directories() {
+        let temp_dir = TempDir::new().unwrap();
+        let config_path = temp_dir
+            .path()
+            .join("nested")
+            .join("pmacs-vpn")
+            .join("config.toml");
+
+        let config = Config::default();
+        config.save(&config_path).unwrap();
+
+        assert!(config_path.exists());
+        let loaded = Config::load(&config_path).unwrap();
+        assert_eq!(loaded.vpn.gateway, config.vpn.gateway);
     }
 
     #[test]

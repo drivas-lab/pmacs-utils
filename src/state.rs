@@ -15,6 +15,7 @@
 //!   "routes": [
 //!     {"hostname": "prometheus.pmacs.upenn.edu", "ip": "172.16.38.40"}
 //!   ],
+//!   "dns_routes": ["10.0.0.2", "10.0.0.3"],
 //!   "hosts_entries": [
 //!     {"hostname": "prometheus.pmacs.upenn.edu", "ip": "172.16.38.40"}
 //!   ],
@@ -56,6 +57,9 @@ pub struct VpnState {
     pub gateway: IpAddr,
     /// Active routes
     pub routes: Vec<RouteEntry>,
+    /// Bootstrap routes added for VPN DNS servers
+    #[serde(default)]
+    pub dns_routes: Vec<IpAddr>,
     /// Hosts file entries we added
     pub hosts_entries: Vec<RouteEntry>,
     /// When the VPN was connected
@@ -72,6 +76,7 @@ impl Default for VpnState {
             tunnel_device: String::new(),
             gateway: "0.0.0.0".parse().unwrap(),
             routes: vec![],
+            dns_routes: vec![],
             hosts_entries: vec![],
             connected_at: String::new(),
             pid: None,
@@ -87,6 +92,7 @@ impl VpnState {
             tunnel_device,
             gateway,
             routes: vec![],
+            dns_routes: vec![],
             hosts_entries: vec![],
             connected_at: chrono_lite_now(),
             pid: None,
@@ -96,6 +102,13 @@ impl VpnState {
     /// Add a route entry
     pub fn add_route(&mut self, hostname: String, ip: IpAddr) {
         self.routes.push(RouteEntry { hostname, ip });
+    }
+
+    /// Add a DNS bootstrap route
+    pub fn add_dns_route(&mut self, ip: IpAddr) {
+        if !self.dns_routes.contains(&ip) {
+            self.dns_routes.push(ip);
+        }
     }
 
     /// Add a hosts entry
@@ -441,6 +454,7 @@ mod tests {
         let state = VpnState::default();
         assert_eq!(state.version, 1);
         assert!(state.routes.is_empty());
+        assert!(state.dns_routes.is_empty());
         assert!(state.hosts_entries.is_empty());
     }
 
@@ -459,6 +473,17 @@ mod tests {
 
         assert_eq!(state.routes.len(), 1);
         assert_eq!(state.routes[0].hostname, "test.example.com");
+    }
+
+    #[test]
+    fn test_add_dns_route_deduplicates() {
+        let mut state = VpnState::default();
+        let ip = "10.0.0.53".parse().unwrap();
+
+        state.add_dns_route(ip);
+        state.add_dns_route(ip);
+
+        assert_eq!(state.dns_routes, vec![ip]);
     }
 
     #[test]
@@ -542,6 +567,7 @@ mod tests {
 
         let parsed: VpnState = serde_json::from_str(json).unwrap();
         assert!(parsed.pid.is_none());
+        assert!(parsed.dns_routes.is_empty());
     }
 
     #[test]
