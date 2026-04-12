@@ -1,7 +1,8 @@
-# Markdown (except README)
+# Markdown (except README, QUALITY, CLAUDE)
 *.md
 !README.md
 !QUALITY.md
+!CLAUDE.md
 
 # Dot-directories
 .*/

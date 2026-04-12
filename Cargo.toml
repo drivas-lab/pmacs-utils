@@ -1,6 +1,6 @@
 [package]
 name = "pmacs-vpn"
-version = "0.2.2"
+version = "0.2.3"
 edition = "2024"
 authors = ["Yunjun Kang <yunjun.kang@pennmedicine.upenn.edu>"]
 description = "Split-tunnel VPN toolkit for PMACS cluster access"
