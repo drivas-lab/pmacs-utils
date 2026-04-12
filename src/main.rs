@@ -1111,10 +1111,11 @@ async fn spawn_daemon(
             println!("Use 'pmacs-vpn disconnect' first, or 'pmacs-vpn status' to check.");
             return Err("VPN already connected".into());
         } else if state.pid.is_some() {
-            // Daemon was running but is now dead - clean up stale state
+            // Daemon was running but is now dead - full cleanup
             println!("Cleaning up stale VPN state from previous session...");
-            // Can't call async cleanup from here easily, just delete state
-            let _ = pmacs_vpn::VpnState::delete();
+            cleanup_vpn(&state).await.map_err(|e| -> Box<dyn std::error::Error + Send + Sync> {
+                e.to_string().into()
+            })?;
         }
     }
 
