@@ -8,7 +8,9 @@ use pmacs_vpn::connection_phase::{ConnectionPhase, PhaseTracker};
 use std::sync::Mutex;
 #[cfg(unix)]
 use tokio::signal::unix::{SignalKind, signal};
-use tracing::{Level, debug, error, info, warn};
+use tracing::{Level, error, info, warn};
+#[cfg(target_os = "macos")]
+use tracing::debug;
 use tracing_subscriber::FmtSubscriber;
 
 /// Get the config file path.
@@ -601,12 +603,12 @@ fn spawn_tray_command_handler(
         while let Ok(cmd) = command_rx.recv() {
             match cmd {
                 TrayCommand::Connect => {
-                    let current = phase.get();
-                    if current != ConnectionPhase::Idle {
-                        info!("Tray: Connect ignored (phase: {:?})", current);
+                    // CAS: atomically Idle → Connecting to prevent race with
+                    // health monitor's Idle → Reconnecting transition.
+                    if !phase.transition(&ConnectionPhase::Idle, ConnectionPhase::Connecting) {
+                        info!("Tray: Connect ignored (phase: {:?})", phase.get());
                         continue;
                     }
-                    phase.set(ConnectionPhase::Connecting);
                     let _ = status_tx.send(VpnStatus::Connecting);
 
                     match tray_connect(&rt) {
@@ -834,17 +836,20 @@ fn spawn_tray_health_monitor(
                     break;
                 }
 
-                // CAS Connected → Reconnecting (first attempt) or stay in Reconnecting
-                if attempt == 1 {
-                    if !phase.transition(
-                        &ConnectionPhase::Connected,
-                        ConnectionPhase::Reconnecting { attempt },
-                    ) {
-                        // User intervened, abort
-                        break;
-                    }
+                // CAS: only transition if current phase is what we expect.
+                // Attempt 1: Connected → Reconnecting (daemon just died)
+                // Attempt 2+: Idle → Reconnecting (previous attempt failed)
+                let expected = if attempt == 1 {
+                    ConnectionPhase::Connected
                 } else {
-                    phase.set(ConnectionPhase::Reconnecting { attempt });
+                    ConnectionPhase::Idle
+                };
+                if !phase.transition(
+                    &expected,
+                    ConnectionPhase::Reconnecting { attempt },
+                ) {
+                    // User intervened or phase changed unexpectedly, abort
+                    break;
                 }
 
                 notifications::notify_reconnecting(attempt, max_attempts);
