@@ -1,9 +1,11 @@
 # Create shortcuts for PMACS VPN
-# Direct exe shortcuts (no PowerShell wrapper - more reliable)
+# Install a stable per-user copy so shortcuts survive Cargo target cleanup.
+. "$PSScriptRoot\windows-install.ps1"
+
 $desktop = [Environment]::GetFolderPath('Desktop')
 $startMenu = [Environment]::GetFolderPath('StartMenu')
-$exePath = 'C:\drivaslab\pmacs-utils\target\release\pmacs-vpn.exe'
-$workDir = 'C:\drivaslab\pmacs-utils'
+$workDir = Get-PmacsProjectRoot -ScriptPath $PSCommandPath
+$exePath = Install-PmacsBinary -ProjectRoot $workDir
 
 $ws = New-Object -ComObject WScript.Shell
 

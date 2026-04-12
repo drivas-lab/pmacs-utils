@@ -3,9 +3,10 @@
 
 $ErrorActionPreference = "Stop"
 
-# Find pmacs-vpn.exe relative to this script
-$ScriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
-$ExePath = Join-Path (Split-Path -Parent $ScriptDir) "target\release\pmacs-vpn.exe"
+# Find pmacs-vpn.exe from the stable install first, then fall back to local build output.
+. "$PSScriptRoot\windows-install.ps1"
+$ProjectDir = Get-PmacsProjectRoot -ScriptPath $PSCommandPath
+$ExePath = Resolve-PmacsExePath -ProjectRoot $ProjectDir
 
 # Check if running as admin
 $isAdmin = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
@@ -22,16 +23,15 @@ if (-not (Test-Path $ExePath)) {
     Write-Host "ERROR: pmacs-vpn.exe not found at:" -ForegroundColor Red
     Write-Host "  $ExePath" -ForegroundColor Red
     Write-Host ""
-    Write-Host "Build it first:" -ForegroundColor Yellow
-    Write-Host "  cd C:\drivaslab\pmacs-utils" -ForegroundColor Cyan
-    Write-Host "  cargo build --release" -ForegroundColor Cyan
+    Write-Host "Install it first:" -ForegroundColor Yellow
+    Write-Host "  cd $ProjectDir" -ForegroundColor Cyan
+    Write-Host "  .\scripts\windows-install.ps1" -ForegroundColor Cyan
     Write-Host ""
     Read-Host "Press Enter to exit"
     exit 1
 }
 
 # Set working directory to project root (where pmacs-vpn.toml lives)
-$ProjectDir = Split-Path -Parent $ScriptDir
 Set-Location $ProjectDir
 
 Write-Host ""
