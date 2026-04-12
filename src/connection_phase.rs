@@ -35,19 +35,20 @@ impl PhaseTracker {
     }
 
     /// Get current phase (cloned).
+    /// Recovers from mutex poisoning (a prior thread panicked while holding the lock).
     pub fn get(&self) -> ConnectionPhase {
-        self.phase.lock().unwrap().clone()
+        self.phase.lock().unwrap_or_else(|e| e.into_inner()).clone()
     }
 
     /// Set phase unconditionally.
     pub fn set(&self, new: ConnectionPhase) {
-        *self.phase.lock().unwrap() = new;
+        *self.phase.lock().unwrap_or_else(|e| e.into_inner()) = new;
     }
 
     /// Compare-and-swap: set to `new` only if current phase matches `expected`.
     /// Returns true if swap succeeded.
     pub fn transition(&self, expected: &ConnectionPhase, new: ConnectionPhase) -> bool {
-        let mut guard = self.phase.lock().unwrap();
+        let mut guard = self.phase.lock().unwrap_or_else(|e| e.into_inner());
         if *guard == *expected {
             *guard = new;
             true

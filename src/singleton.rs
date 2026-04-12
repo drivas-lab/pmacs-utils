@@ -132,6 +132,10 @@ pub fn acquire_tray_lock() -> Result<TrayLock, String> {
 mod tests {
     use super::*;
 
+    // NOTE: These tests use the real production lock (Global\pmacs-vpn-tray on Windows,
+    // ~/.pmacs-vpn/tray.lock on Unix). They will fail if a tray instance is running.
+    // Run with: cargo test singleton -- --test-threads=1
+
     #[test]
     fn test_acquire_lock_succeeds() {
         // First acquisition should succeed
