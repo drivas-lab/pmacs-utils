@@ -61,11 +61,12 @@ auth       sufficient     pam_tid.so
 Run from an Administrator terminal:
 
 ```powershell
-cargo build
-.\target\debug\pmacs-vpn.exe init
-.\target\debug\pmacs-vpn.exe connect --save-password
-.\target\debug\pmacs-vpn.exe disconnect
-.\target\debug\pmacs-vpn.exe tray
+cargo build --release
+.\scripts\windows-install.ps1
+& "$env:LOCALAPPDATA\Programs\PMACS VPN\pmacs-vpn.exe" init
+& "$env:LOCALAPPDATA\Programs\PMACS VPN\pmacs-vpn.exe" connect --save-password
+& "$env:LOCALAPPDATA\Programs\PMACS VPN\pmacs-vpn.exe" disconnect
+& "$env:LOCALAPPDATA\Programs\PMACS VPN\pmacs-vpn.exe" tray
 ```
 
 Tray behavior on Windows:
@@ -73,6 +74,7 @@ Tray behavior on Windows:
 - Connect/Reconnect/Disconnect work from tray.
 - `Start with Windows` menu option controls auto-start registry entry.
 - Login auto-start opens tray only; it does not auto-connect.
+- `.\scripts\create-shortcuts.ps1` now installs a stable copy under `%LOCALAPPDATA%\Programs\PMACS VPN` so Start Menu and desktop shortcuts survive `cargo clean` or deleting `target`.
 
 ## Background CLI mode (both platforms)
 
