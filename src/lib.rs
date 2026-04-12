@@ -22,10 +22,12 @@ pub mod macos_permissions;
 pub mod notifications;
 pub mod platform;
 pub mod startup;
+pub mod singleton;
 pub mod state;
 pub mod tray;
 pub mod vpn;
 
 pub use config::{Config, DuoMethod, Preferences, VpnConfig, resolve_config_path};
 pub use credentials::{delete_password, get_password, store_password};
+pub use singleton::acquire_tray_lock;
 pub use state::{AuthToken, VpnState};
