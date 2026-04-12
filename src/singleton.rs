@@ -49,11 +49,14 @@ mod platform {
 
 #[cfg(not(windows))]
 mod platform {
-    use std::fs::{File, OpenOptions};
+    use nix::fcntl::Flock;
+    use std::fs::OpenOptions;
+    use std::os::fd::OwnedFd;
     use std::path::PathBuf;
 
     pub struct TrayLock {
-        _file: File,
+        // The Flock guard owns the locked fd — lock is released on drop.
+        _flock: Flock<OwnedFd>,
         path: PathBuf,
     }
 
@@ -70,6 +73,8 @@ mod platform {
 
     impl TrayLock {
         pub fn acquire() -> Result<Self, String> {
+            use nix::fcntl::FlockArg;
+
             let path = lock_path()?;
             let file = OpenOptions::new()
                 .write(true)
@@ -78,33 +83,27 @@ mod platform {
                 .open(&path)
                 .map_err(|e| format!("Failed to open lock file: {}", e))?;
 
-            use nix::fcntl::{Flock, FlockArg};
-            use std::os::fd::AsFd;
+            // Write PID for debugging before converting to OwnedFd
+            {
+                use std::io::Write;
+                let mut f = &file;
+                let _ = f.write_all(format!("{}", std::process::id()).as_bytes());
+            }
 
-            // Try non-blocking exclusive lock
-            match Flock::lock(file.as_fd().try_clone_to_owned().map_err(|e| e.to_string())?, FlockArg::LockExclusiveNonblock) {
-                Ok(_flock) => {
-                    // Write our PID for debugging
-                    use std::io::Write;
-                    let mut f = &file;
-                    let _ = f.write_all(format!("{}", std::process::id()).as_bytes());
+            // Convert File → OwnedFd; Flock::lock takes ownership
+            let owned_fd: OwnedFd = file.into();
 
-                    // We need to keep the File alive (flock is tied to the fd).
-                    // The Flock guard from nix consumes the fd, but we opened a
-                    // second fd via try_clone above.  Re-lock on the original fd
-                    // so we keep it simple: just use raw libc flock on the File fd.
-                    Ok(TrayLock { _file: file, path })
-                }
-                Err(_) => {
-                    Err("Another tray instance is already running".to_string())
-                }
+            // Non-blocking exclusive lock; Flock guard keeps the lock held
+            match Flock::lock(owned_fd, FlockArg::LockExclusiveNonblock) {
+                Ok(flock) => Ok(TrayLock { _flock: flock, path }),
+                Err(_) => Err("Another tray instance is already running".to_string()),
             }
         }
     }
 
     impl Drop for TrayLock {
         fn drop(&mut self) {
-            // Lock is released when _file is dropped.
+            // Lock is released when _flock drops (unlocks and closes the fd).
             // Remove the lock file for cleanliness.
             let _ = std::fs::remove_file(&self.path);
         }

@@ -4,16 +4,12 @@ use pmacs_vpn::gp;
 use pmacs_vpn::notifications;
 use pmacs_vpn::vpn::hosts::HostsManager;
 use pmacs_vpn::vpn::routing::VpnRouter;
+use pmacs_vpn::connection_phase::{ConnectionPhase, PhaseTracker};
 use std::sync::Mutex;
-use std::sync::atomic::{AtomicBool, Ordering};
 #[cfg(unix)]
 use tokio::signal::unix::{SignalKind, signal};
 use tracing::{Level, debug, error, info, warn};
 use tracing_subscriber::FmtSubscriber;
-
-/// Global flag to indicate user-initiated disconnect is in progress
-/// This prevents the health monitor from triggering auto-reconnect
-static USER_DISCONNECT_IN_PROGRESS: AtomicBool = AtomicBool::new(false);
 
 /// Get the config file path.
 fn get_config_path() -> std::path::PathBuf {
@@ -597,6 +593,7 @@ fn spawn_tray_command_handler(
     rt: tokio::runtime::Handle,
     command_rx: std::sync::mpsc::Receiver<pmacs_vpn::tray::TrayCommand>,
     status_tx: std::sync::mpsc::Sender<pmacs_vpn::tray::VpnStatus>,
+    phase: PhaseTracker,
 ) {
     use pmacs_vpn::tray::{TrayCommand, VpnStatus};
 
@@ -604,23 +601,30 @@ fn spawn_tray_command_handler(
         while let Ok(cmd) = command_rx.recv() {
             match cmd {
                 TrayCommand::Connect => {
-                    info!("Tray: Connect requested");
+                    let current = phase.get();
+                    if current != ConnectionPhase::Idle {
+                        info!("Tray: Connect ignored (phase: {:?})", current);
+                        continue;
+                    }
+                    phase.set(ConnectionPhase::Connecting);
                     let _ = status_tx.send(VpnStatus::Connecting);
 
                     match tray_connect(&rt) {
                         Ok(ip) => {
                             notifications::notify_connected();
+                            phase.set(ConnectionPhase::Connected);
                             let _ = status_tx.send(VpnStatus::Connected { ip });
                         }
                         Err(e) => {
                             error!("Tray connect failed: {}", e);
+                            phase.set(ConnectionPhase::Idle);
                             let _ = status_tx.send(VpnStatus::Error(e));
                         }
                     }
                 }
                 TrayCommand::Disconnect => {
                     info!("Tray: Disconnect requested");
-                    USER_DISCONNECT_IN_PROGRESS.store(true, Ordering::SeqCst);
+                    phase.set(ConnectionPhase::Disconnecting);
                     let _ = status_tx.send(VpnStatus::Disconnecting);
 
                     let result = match tray_request_disconnect(&rt) {
@@ -649,11 +653,11 @@ fn spawn_tray_command_handler(
                         }
                     }
 
-                    USER_DISCONNECT_IN_PROGRESS.store(false, Ordering::SeqCst);
+                    phase.set(ConnectionPhase::Idle);
                 }
                 TrayCommand::Reconnect => {
                     info!("Tray: Reconnect requested");
-                    USER_DISCONNECT_IN_PROGRESS.store(true, Ordering::SeqCst);
+                    phase.set(ConnectionPhase::Disconnecting);
 
                     let disconnect_result = tray_request_disconnect(&rt);
                     if is_admin() {
@@ -663,7 +667,7 @@ fn spawn_tray_command_handler(
                         && state.pid.is_some()
                         && state.is_daemon_running()
                     {
-                        USER_DISCONNECT_IN_PROGRESS.store(false, Ordering::SeqCst);
+                        phase.set(ConnectionPhase::Idle);
                         let _ = status_tx.send(VpnStatus::Error(
                             "Reconnect failed: could not signal existing VPN daemon. Try Disconnect first."
                                 .to_string(),
@@ -672,22 +676,31 @@ fn spawn_tray_command_handler(
                     }
                     wait_for_daemon_offline(&rt);
 
-                    USER_DISCONNECT_IN_PROGRESS.store(false, Ordering::SeqCst);
+                    phase.set(ConnectionPhase::Connecting);
                     let _ = status_tx.send(VpnStatus::Connecting);
 
                     match tray_connect(&rt) {
                         Ok(ip) => {
                             notifications::notify_connected();
+                            phase.set(ConnectionPhase::Connected);
                             let _ = status_tx.send(VpnStatus::Connected { ip });
                         }
                         Err(e) => {
                             error!("Tray reconnect failed: {}", e);
+                            phase.set(ConnectionPhase::Idle);
                             let _ = status_tx
                                 .send(VpnStatus::Error(format!("Reconnect failed: {}", e)));
                         }
                     }
                 }
                 TrayCommand::AutoReconnect { attempt } => {
+                    // Only proceed if health monitor set us to Reconnecting
+                    let current = phase.get();
+                    if !matches!(current, ConnectionPhase::Reconnecting { .. }) {
+                        info!("Tray: AutoReconnect ignored (phase: {:?}, user intervened)", current);
+                        continue;
+                    }
+
                     info!("Tray: Auto-reconnect attempt {}", attempt);
                     let _ = tray_request_disconnect(&rt);
                     if is_admin() {
@@ -695,13 +708,17 @@ fn spawn_tray_command_handler(
                     }
                     wait_for_daemon_offline(&rt);
 
+                    phase.set(ConnectionPhase::Connecting);
+
                     match tray_connect(&rt) {
                         Ok(ip) => {
                             notifications::notify_connected();
+                            phase.set(ConnectionPhase::Connected);
                             let _ = status_tx.send(VpnStatus::Connected { ip });
                         }
                         Err(e) => {
                             error!("Tray auto-reconnect failed: {}", e);
+                            phase.set(ConnectionPhase::Idle);
                             let _ = status_tx
                                 .send(VpnStatus::Error(format!("Auto-reconnect failed: {}", e)));
                         }
@@ -743,7 +760,7 @@ fn spawn_tray_command_handler(
                 }
                 TrayCommand::Exit => {
                     info!("Tray: Exit requested");
-                    USER_DISCONNECT_IN_PROGRESS.store(true, Ordering::SeqCst);
+                    phase.set(ConnectionPhase::Disconnecting);
                     let _ = tray_request_disconnect(&rt);
                     if is_admin() {
                         let _ = best_effort_admin_cleanup(&rt);
@@ -759,87 +776,127 @@ fn spawn_tray_health_monitor(
     rt: &tokio::runtime::Handle,
     status_tx: std::sync::mpsc::Sender<pmacs_vpn::tray::VpnStatus>,
     command_tx: std::sync::mpsc::Sender<pmacs_vpn::tray::TrayCommand>,
+    phase: PhaseTracker,
 ) {
     use pmacs_vpn::tray::{TrayCommand, VpnStatus};
 
     let rt = rt.clone();
     rt.spawn(async move {
-        let config_path = get_config_path();
-        let (auto_reconnect_enabled, max_attempts, base_delay) =
-            if let Ok(config) = pmacs_vpn::Config::load(&config_path) {
-                (
-                    config.preferences.auto_reconnect,
-                    config.preferences.max_reconnect_attempts,
-                    config.preferences.reconnect_delay_secs,
-                )
-            } else {
-                (true, 3, 5)
-            };
-
         let ipc_client = pmacs_vpn::ipc::IpcClient::new();
-        let mut was_connected = false;
-        let mut reconnect_attempts = 0u32;
 
         loop {
             tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
 
-            if USER_DISCONNECT_IN_PROGRESS.load(Ordering::SeqCst) {
-                was_connected = false;
-                reconnect_attempts = 0;
+            // Only act when we believe we're Connected
+            if phase.get() != ConnectionPhase::Connected {
                 continue;
             }
 
             let daemon_alive = ipc_client.ping().await.is_ok();
-
             if daemon_alive {
-                was_connected = true;
-                reconnect_attempts = 0;
                 continue;
             }
 
-            if !was_connected {
-                if let Ok(Some(state)) = pmacs_vpn::VpnState::load()
-                    && state.pid.is_some()
-                    && state.is_daemon_running()
-                {
-                    debug!("Health monitor: daemon PID exists but IPC not ready");
+            // Daemon died while we thought we were Connected.
+            // Re-check phase — user may have clicked Disconnect between our check and now.
+            if phase.get() != ConnectionPhase::Connected {
+                continue;
+            }
+
+            // Read config for each reconnect decision (picks up runtime changes)
+            let config_path = get_config_path();
+            let (auto_reconnect_enabled, max_attempts, base_delay) =
+                if let Ok(config) = pmacs_vpn::Config::load(&config_path) {
+                    (
+                        config.preferences.auto_reconnect,
+                        config.preferences.max_reconnect_attempts,
+                        config.preferences.reconnect_delay_secs,
+                    )
+                } else {
+                    (true, 3, 5)
+                };
+
+            if !auto_reconnect_enabled {
+                notifications::notify_unexpected_disconnect();
+                phase.set(ConnectionPhase::Idle);
+                let _ = status_tx.send(VpnStatus::Disconnected);
+                continue;
+            }
+
+            // Begin reconnect sequence
+            let mut attempt = 0u32;
+            loop {
+                attempt += 1;
+                if attempt > max_attempts {
+                    notifications::notify_reconnect_failed();
+                    phase.set(ConnectionPhase::Idle);
+                    let _ = status_tx.send(VpnStatus::Disconnected);
+                    break;
                 }
-                continue;
-            }
 
-            was_connected = false;
-            if USER_DISCONNECT_IN_PROGRESS.load(Ordering::SeqCst) {
-                reconnect_attempts = 0;
-                continue;
-            }
+                // CAS Connected → Reconnecting (first attempt) or stay in Reconnecting
+                if attempt == 1 {
+                    if !phase.transition(
+                        &ConnectionPhase::Connected,
+                        ConnectionPhase::Reconnecting { attempt },
+                    ) {
+                        // User intervened, abort
+                        break;
+                    }
+                } else {
+                    phase.set(ConnectionPhase::Reconnecting { attempt });
+                }
 
-            if auto_reconnect_enabled && reconnect_attempts < max_attempts {
-                reconnect_attempts += 1;
-                let delay = std::cmp::min(base_delay * (1 << (reconnect_attempts - 1)), 60);
-                notifications::notify_reconnecting(reconnect_attempts, max_attempts);
+                notifications::notify_reconnecting(attempt, max_attempts);
                 let _ = status_tx.send(VpnStatus::Reconnecting {
-                    attempt: reconnect_attempts,
+                    attempt,
                     max_attempts,
                 });
 
+                let delay = std::cmp::min(base_delay * (1 << (attempt - 1)), 60);
                 tokio::time::sleep(tokio::time::Duration::from_secs(delay as u64)).await;
-                if USER_DISCONNECT_IN_PROGRESS.load(Ordering::SeqCst) {
-                    let _ = status_tx.send(VpnStatus::Disconnected);
-                    reconnect_attempts = 0;
-                    continue;
+
+                // After sleep, check if user intervened
+                if !matches!(phase.get(), ConnectionPhase::Reconnecting { .. }) {
+                    break;
                 }
 
-                let _ = command_tx.send(TrayCommand::AutoReconnect {
-                    attempt: reconnect_attempts,
-                });
-            } else {
-                if auto_reconnect_enabled {
-                    notifications::notify_reconnect_failed();
-                } else {
-                    notifications::notify_unexpected_disconnect();
+                let _ = command_tx.send(TrayCommand::AutoReconnect { attempt });
+
+                // Wait for the command handler to process and update phase.
+                // Poll phase for up to 60 seconds.
+                let mut resolved = false;
+                for _ in 0..120 {
+                    tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
+                    let current = phase.get();
+                    match current {
+                        ConnectionPhase::Connected => {
+                            resolved = true;
+                            break;
+                        }
+                        ConnectionPhase::Idle => {
+                            // Connect failed, try next attempt
+                            break;
+                        }
+                        ConnectionPhase::Reconnecting { .. }
+                        | ConnectionPhase::Connecting => {
+                            // Still in progress, keep waiting
+                            continue;
+                        }
+                        ConnectionPhase::Disconnecting => {
+                            // User intervened
+                            resolved = true;
+                            break;
+                        }
+                    }
                 }
-                let _ = status_tx.send(VpnStatus::Disconnected);
-                reconnect_attempts = 0;
+
+                if resolved || phase.get() == ConnectionPhase::Connected {
+                    break;
+                }
+
+                // If phase is Idle after command handler ran, it means connect failed.
+                // Loop to next attempt.
             }
         }
     });
@@ -865,8 +922,9 @@ fn start_tray_services(
         startup.duo_method,
     );
 
-    spawn_tray_command_handler(rt.clone(), command_rx, status_tx.clone());
-    spawn_tray_health_monitor(rt, status_tx.clone(), command_tx);
+    let phase = PhaseTracker::new();
+    spawn_tray_command_handler(rt.clone(), command_rx, status_tx.clone(), phase.clone());
+    spawn_tray_health_monitor(rt, status_tx.clone(), command_tx, phase);
 
     (app, status_tx)
 }
