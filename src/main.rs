@@ -1728,6 +1728,14 @@ async fn connect_vpn_with_token(token: AuthToken) -> Result<(), Box<dyn std::err
         .clone()
         .unwrap_or_else(pmacs_vpn::ipc::ipc_path);
 
+    // Pre-flight: check if another daemon is already serving this IPC path.
+    // This closes the race window between parent's IPC check and child startup.
+    let preflight_client = pmacs_vpn::ipc::IpcClient::with_path(ipc_path.clone());
+    if preflight_client.ping().await.is_ok() {
+        error!("Another VPN daemon is already running on IPC path: {}", ipc_path);
+        return Err("Another VPN daemon is already serving IPC".into());
+    }
+
     #[cfg(target_os = "macos")]
     let socket_owner = launchd_trigger_socket_owner();
 
