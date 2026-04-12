@@ -14,6 +14,7 @@
 //! - `state`: Persistent state for crash recovery
 
 pub mod config;
+pub mod connection_phase;
 pub mod credentials;
 pub mod gp;
 pub mod ipc;
