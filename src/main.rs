@@ -895,6 +895,13 @@ fn spawn_tray_health_monitor(
                     break;
                 }
 
+                if !resolved {
+                    warn!(
+                        "Auto-reconnect attempt {}: command handler did not resolve within 60s (phase: {:?})",
+                        attempt, phase.get()
+                    );
+                }
+
                 // If phase is Idle after command handler ran, it means connect failed.
                 // Loop to next attempt.
             }
