@@ -873,6 +873,16 @@ fn start_tray_services(
 
 /// Run the VPN with system tray GUI.
 async fn run_tray_mode(launched_at_login: bool) {
+    // Single-instance guard: exit if another tray is already running.
+    let _tray_lock = match pmacs_vpn::acquire_tray_lock() {
+        Ok(lock) => lock,
+        Err(msg) => {
+            info!("Exiting: {}", msg);
+            eprintln!("{}", msg);
+            std::process::exit(0);
+        }
+    };
+
     let _ = ctrlc::set_handler(move || {
         cleanup_vpn_on_exit();
         std::process::exit(0);
