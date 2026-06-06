@@ -1140,8 +1140,11 @@ async fn spawn_daemon(
                 eprintln!("Error loading config file: {}", e);
                 eprintln!();
                 eprintln!("Your config file may be corrupted. Options:");
-                eprintln!("  1. Fix the syntax error in pmacs-vpn.toml");
-                eprintln!("  2. Delete pmacs-vpn.toml and run 'pmacs-vpn connect' to recreate");
+                eprintln!("  1. Fix the syntax error in {}", config_path.display());
+                eprintln!(
+                    "  2. Delete {} and run 'pmacs-vpn connect' to recreate",
+                    config_path.display()
+                );
                 return Err(e.into());
             }
         }
@@ -1419,8 +1422,11 @@ async fn connect_vpn(
                 eprintln!("Error loading config file: {}", e);
                 eprintln!();
                 eprintln!("Your config file may be corrupted. Options:");
-                eprintln!("  1. Fix the syntax error in pmacs-vpn.toml");
-                eprintln!("  2. Delete pmacs-vpn.toml and run 'pmacs-vpn connect' to recreate");
+                eprintln!("  1. Fix the syntax error in {}", config_path.display());
+                eprintln!(
+                    "  2. Delete {} and run 'pmacs-vpn connect' to recreate",
+                    config_path.display()
+                );
                 eprintln!("  3. Run 'pmacs-vpn init' to generate a fresh config");
                 return Err(e.into());
             }
@@ -1451,7 +1457,7 @@ async fn connect_vpn(
     // Save config if user requested
     if save_config {
         config.save(&config_path)?;
-        println!("Config saved to pmacs-vpn.toml\n");
+        println!("Config saved to {}\n", config_path.display());
     }
 
     // 2. Get username (from arg, config, or prompt)
