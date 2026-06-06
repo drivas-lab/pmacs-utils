@@ -220,6 +220,26 @@ fn parse_challenge(body: &str) -> Option<ChallengeResponse> {
     Some(ChallengeResponse { input_str, message })
 }
 
+/// Parse an HTML error response from the gateway.
+/// Format: var respStatus = "Error"; var respMsg = "...";
+/// Returns the human-readable error message if present.
+fn parse_error(body: &str) -> Option<String> {
+    if !body.contains("respStatus = \"Error\"") {
+        return None;
+    }
+
+    let message = body
+        .find("respMsg = \"")
+        .and_then(|start| {
+            let rest = &body[start + 11..];
+            rest.find('"').map(|end| rest[..end].to_string())
+        })
+        .filter(|m| !m.is_empty())
+        .unwrap_or_else(|| "Unknown error".to_string());
+
+    Some(message)
+}
+
 /// Parse JNLP login response
 /// Handles both labeled format: (auth-cookie), value, (portal), value, ...
 /// And positional format: empty, cookie, persistent-cookie, gateway, user, profile, vsys, domain, ...
@@ -228,6 +248,13 @@ fn parse_jnlp_response(
     username: &str,
     gateway: &str,
 ) -> Result<LoginResponse, AuthError> {
+    // The gateway returns an HTML error page (not JNLP) when auth is rejected,
+    // e.g. "Invalid username or password". Surface that message instead of a
+    // confusing XML "missing field" error from the JNLP parser below.
+    if let Some(msg) = parse_error(body) {
+        return Err(AuthError::AuthFailed(msg));
+    }
+
     let jnlp: JnlpXml = quick_xml::de::from_str(body)
         .map_err(|e| AuthError::AuthFailed(format!("Invalid login response: {}", e)))?;
 
@@ -441,15 +468,7 @@ pub async fn login(
         debug!("MFA response received ({} bytes)", challenge_body.len());
 
         // Check for error response
-        if challenge_body.contains("respStatus = \"Error\"") {
-            // Extract error message
-            let msg = challenge_body
-                .find("respMsg = \"")
-                .and_then(|start| {
-                    let rest = &challenge_body[start + 11..];
-                    rest.find('"').map(|end| rest[..end].to_string())
-                })
-                .unwrap_or_else(|| "Unknown error".to_string());
+        if let Some(msg) = parse_error(&challenge_body) {
             return Err(AuthError::AuthFailed(format!("MFA failed: {}", msg)));
         }
 
@@ -779,5 +798,44 @@ mod tests {
         let xml = r#"<jnlp><application-desc></application-desc></jnlp>"#;
         let challenge = parse_challenge(xml);
         assert!(challenge.is_none());
+    }
+
+    #[test]
+    fn test_parse_error_helper() {
+        let html = r#"<html><body>
+  var respStatus = "Error";
+  var respMsg = "Invalid username or password";
+  thisForm.inputStr.value = "";
+</body></html>"#;
+        assert_eq!(
+            parse_error(html),
+            Some("Invalid username or password".to_string())
+        );
+        // Non-error responses return None
+        assert_eq!(parse_error(r#"<jnlp><application-desc></application-desc></jnlp>"#), None);
+        assert_eq!(parse_error(r#"var respStatus = "Challenge";"#), None);
+    }
+
+    #[test]
+    fn test_error_response_surfaces_real_message() {
+        // Regression: gateway returns an HTML error page on auth rejection.
+        // We must surface "Invalid username or password", NOT a confusing
+        // "missing field `application-desc`" XML parse error.
+        let html = r#"<html>
+  <head></head>
+  <body>
+  var respStatus = "Error";
+  var respMsg = "Invalid username or password";
+  thisForm.inputStr.value = "";
+</body>
+</html>"#;
+
+        let result = parse_jnlp_response(html, "yjk", "psomvpn.uphs.upenn.edu");
+        match result {
+            Err(AuthError::AuthFailed(msg)) => {
+                assert_eq!(msg, "Invalid username or password");
+            }
+            other => panic!("expected AuthFailed with real message, got {:?}", other),
+        }
     }
 }
