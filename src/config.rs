@@ -1,7 +1,7 @@
 //! Configuration handling for PMACS VPN
 
 use serde::{Deserialize, Serialize};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use thiserror::Error;
 
 #[derive(Error, Debug)]
@@ -164,6 +164,40 @@ impl Config {
     }
 }
 
+fn legacy_config_path() -> PathBuf {
+    PathBuf::from("pmacs-vpn.toml")
+}
+
+fn preferred_config_path() -> PathBuf {
+    if let Ok(xdg) = std::env::var("XDG_CONFIG_HOME") {
+        return PathBuf::from(xdg).join("pmacs-vpn").join("config.toml");
+    }
+
+    if let Ok(home) = std::env::var("HOME") {
+        return PathBuf::from(home)
+            .join(".config")
+            .join("pmacs-vpn")
+            .join("config.toml");
+    }
+
+    dirs::config_dir()
+        .map(|d| d.join("pmacs-vpn").join("config.toml"))
+        .unwrap_or_else(legacy_config_path)
+}
+
+fn migrate_legacy_config(legacy_path: &Path, preferred_path: &Path) -> Option<PathBuf> {
+    if !legacy_path.exists() || preferred_path.exists() {
+        return None;
+    }
+
+    if let Some(parent) = preferred_path.parent() {
+        std::fs::create_dir_all(parent).ok()?;
+    }
+
+    std::fs::copy(legacy_path, preferred_path).ok()?;
+    Some(preferred_path.to_path_buf())
+}
+
 /// Resolve config file path.
 ///
 /// Searches for an existing config in priority order, falling back to
@@ -173,33 +207,21 @@ impl Config {
 /// 3. pmacs-vpn.toml (working directory, legacy/dev)
 /// 4. Platform config dir (AppData\\Roaming on Windows, ~/.config on Linux/macOS)
 pub fn resolve_config_path() -> PathBuf {
-    let candidates: Vec<Option<PathBuf>> = vec![
-        std::env::var("XDG_CONFIG_HOME")
-            .ok()
-            .map(|xdg| PathBuf::from(xdg).join("pmacs-vpn").join("config.toml")),
-        std::env::var("HOME").ok().map(|home| {
-            PathBuf::from(home)
-                .join(".config")
-                .join("pmacs-vpn")
-                .join("config.toml")
-        }),
-        Some(PathBuf::from("pmacs-vpn.toml")),
-        dirs::config_dir().map(|d| d.join("pmacs-vpn").join("config.toml")),
-    ];
-
-    for path in candidates.iter().flatten() {
-        if path.exists() {
-            return path.clone();
-        }
+    let preferred_path = preferred_config_path();
+    if preferred_path.exists() {
+        return preferred_path;
     }
 
-    if let Some(path) = candidates[..2].iter().flatten().next() {
-        return path.clone();
+    let legacy_path = legacy_config_path();
+    if let Some(migrated_path) = migrate_legacy_config(&legacy_path, &preferred_path) {
+        return migrated_path;
     }
 
-    candidates[3]
-        .clone()
-        .unwrap_or_else(|| PathBuf::from("pmacs-vpn.toml"))
+    if legacy_path.exists() {
+        return legacy_path;
+    }
+
+    preferred_path
 }
 
 #[cfg(test)]
@@ -475,5 +497,29 @@ duo_method = "sms"
         assert!(loaded.preferences.auto_connect);
         assert!(loaded.preferences.auto_reconnect);
         assert_eq!(loaded.preferences.inbound_timeout_secs, 45);
+    }
+
+    #[test]
+    fn test_migrate_legacy_config_copies_to_preferred_location() {
+        let temp_dir = TempDir::new().unwrap();
+        let legacy_path = temp_dir.path().join("pmacs-vpn.toml");
+        let preferred_path = temp_dir
+            .path()
+            .join(".config")
+            .join("pmacs-vpn")
+            .join("config.toml");
+
+        let config = Config::default();
+        config.save(&legacy_path).unwrap();
+
+        let migrated = migrate_legacy_config(&legacy_path, &preferred_path).unwrap();
+
+        assert_eq!(migrated, preferred_path);
+        assert!(preferred_path.exists());
+        assert!(legacy_path.exists());
+        assert_eq!(
+            Config::load(&preferred_path).unwrap().vpn.gateway,
+            config.vpn.gateway
+        );
     }
 }

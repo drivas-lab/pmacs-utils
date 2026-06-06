@@ -120,7 +120,8 @@ cleanly when you're done. Your other traffic stays between you and your ISP.
 
 ## Configuration
 
-Settings are stored in `pmacs-vpn.toml` (created by `pmacs-vpn init`).
+Settings are stored in `~/.config/pmacs-vpn/config.toml` on macOS/Linux
+(`pmacs-vpn.toml` in the working directory is still supported as a legacy/dev fallback and will be migrated on next run).
 
 ```toml
 [vpn]
