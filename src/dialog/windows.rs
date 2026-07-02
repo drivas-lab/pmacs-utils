@@ -38,6 +38,10 @@ fn prompt_creds_internal(
 
     let message_h = HSTRING::from(message);
     let title_h = HSTRING::from(title);
+    // CredUIPromptForCredentialsW requires a non-NULL target name; passing NULL
+    // fails with ERROR_INVALID_PARAMETER before any UI is shown. With
+    // CREDUI_FLAGS_DO_NOT_PERSIST the name is display-only, never stored.
+    let target_h = HSTRING::from("pmacs-vpn");
 
     let info = CREDUI_INFOW {
         cbSize: std::mem::size_of::<CREDUI_INFOW>() as u32,
@@ -58,7 +62,7 @@ fn prompt_creds_internal(
     let result = unsafe {
         CredUIPromptForCredentialsW(
             Some(&info),
-            PCWSTR::null(),
+            PCWSTR::from_raw(target_h.as_ptr()),
             None,
             0,
             &mut username_buf,
@@ -78,6 +82,11 @@ fn prompt_creds_internal(
             .to_string();
         Some((username, password))
     } else {
+        // 1223 = ERROR_CANCELLED (user dismissed the dialog); anything else is
+        // an API failure worth surfacing in logs.
+        if result != WIN32_ERROR(1223) {
+            tracing::warn!("CredUIPromptForCredentialsW failed: {:?}", result);
+        }
         None
     }
 }
