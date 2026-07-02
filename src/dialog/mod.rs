@@ -6,10 +6,10 @@
 //! is not compiled yet — macOS reports dialogs unavailable and callers fall
 //! back to a clean error instead of hanging on a console prompt.
 
-#[cfg(target_os = "windows")]
-mod windows;
 #[cfg(target_os = "linux")]
 mod linux;
+#[cfg(target_os = "windows")]
+mod windows;
 
 /// Prompt for VPN credentials (username + password)
 ///

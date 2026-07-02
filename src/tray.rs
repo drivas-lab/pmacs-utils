@@ -341,66 +341,64 @@ impl TrayApp {
                     }
                 }
 
-                Event::UserEvent(UserEvent::VpnStatus(status)) => {
-                    if status != current_status {
-                        debug!("VPN status changed: {:?}", status);
+                Event::UserEvent(UserEvent::VpnStatus(status)) if status != current_status => {
+                    debug!("VPN status changed: {:?}", status);
 
-                        // Notifications are sent from main.rs command handlers
-                        // Only handle error notifications here (not sent elsewhere)
-                        if let VpnStatus::Error(msg) = &status {
-                            notifications::notify_error(msg);
-                        }
+                    // Notifications are sent from main.rs command handlers
+                    // Only handle error notifications here (not sent elsewhere)
+                    if let VpnStatus::Error(msg) = &status {
+                        notifications::notify_error(msg);
+                    }
 
-                        // Update menu items based on status
-                        match &status {
-                            VpnStatus::Disconnected => {
-                                status_item.set_text("Status: Disconnected");
-                                connect_item.set_enabled(true);
-                                disconnect_item.set_enabled(false);
-                                reconnect_item.set_enabled(false);
-                            }
-                            VpnStatus::Connecting => {
-                                status_item.set_text("Status: Connecting...");
-                                connect_item.set_enabled(false);
-                                disconnect_item.set_enabled(false);
-                                reconnect_item.set_enabled(false);
-                            }
-                            VpnStatus::Connected { ip } => {
-                                status_item.set_text(format!("Status: Connected ({})", ip));
-                                connect_item.set_enabled(false);
-                                disconnect_item.set_enabled(true);
-                                reconnect_item.set_enabled(true);
-                            }
-                            VpnStatus::Disconnecting => {
-                                status_item.set_text("Status: Disconnecting...");
-                                connect_item.set_enabled(false);
-                                disconnect_item.set_enabled(false);
-                                reconnect_item.set_enabled(false);
-                            }
-                            VpnStatus::Reconnecting {
-                                attempt,
-                                max_attempts,
-                            } => {
-                                status_item.set_text(format!(
-                                    "Status: Reconnecting ({}/{})",
-                                    attempt, max_attempts
-                                ));
-                                connect_item.set_enabled(false);
-                                disconnect_item.set_enabled(true);
-                                reconnect_item.set_enabled(false);
-                            }
-                            VpnStatus::Error(_) => {
-                                status_item.set_text("Status: Error");
-                                connect_item.set_enabled(true);
-                                disconnect_item.set_enabled(false);
-                                reconnect_item.set_enabled(true);
-                            }
+                    // Update menu items based on status
+                    match &status {
+                        VpnStatus::Disconnected => {
+                            status_item.set_text("Status: Disconnected");
+                            connect_item.set_enabled(true);
+                            disconnect_item.set_enabled(false);
+                            reconnect_item.set_enabled(false);
                         }
+                        VpnStatus::Connecting => {
+                            status_item.set_text("Status: Connecting...");
+                            connect_item.set_enabled(false);
+                            disconnect_item.set_enabled(false);
+                            reconnect_item.set_enabled(false);
+                        }
+                        VpnStatus::Connected { ip } => {
+                            status_item.set_text(format!("Status: Connected ({})", ip));
+                            connect_item.set_enabled(false);
+                            disconnect_item.set_enabled(true);
+                            reconnect_item.set_enabled(true);
+                        }
+                        VpnStatus::Disconnecting => {
+                            status_item.set_text("Status: Disconnecting...");
+                            connect_item.set_enabled(false);
+                            disconnect_item.set_enabled(false);
+                            reconnect_item.set_enabled(false);
+                        }
+                        VpnStatus::Reconnecting {
+                            attempt,
+                            max_attempts,
+                        } => {
+                            status_item.set_text(format!(
+                                "Status: Reconnecting ({}/{})",
+                                attempt, max_attempts
+                            ));
+                            connect_item.set_enabled(false);
+                            disconnect_item.set_enabled(true);
+                            reconnect_item.set_enabled(false);
+                        }
+                        VpnStatus::Error(_) => {
+                            status_item.set_text("Status: Error");
+                            connect_item.set_enabled(true);
+                            disconnect_item.set_enabled(false);
+                            reconnect_item.set_enabled(true);
+                        }
+                    }
 
-                        current_status = status.clone();
-                        if let Some(ref tray) = tray_icon {
-                            update_tray_for_status(tray, &status);
-                        }
+                    current_status = status.clone();
+                    if let Some(ref tray) = tray_icon {
+                        update_tray_for_status(tray, &status);
                     }
                 }
 

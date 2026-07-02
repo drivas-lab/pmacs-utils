@@ -1,16 +1,16 @@
 use clap::{Parser, Subcommand};
 use pmacs_vpn::AuthToken;
+use pmacs_vpn::connection_phase::{ConnectionPhase, PhaseTracker};
 use pmacs_vpn::gp;
 use pmacs_vpn::notifications;
 use pmacs_vpn::vpn::hosts::HostsManager;
 use pmacs_vpn::vpn::routing::VpnRouter;
-use pmacs_vpn::connection_phase::{ConnectionPhase, PhaseTracker};
 use std::sync::Mutex;
 #[cfg(unix)]
 use tokio::signal::unix::{SignalKind, signal};
-use tracing::{Level, error, info, warn};
 #[cfg(target_os = "macos")]
 use tracing::debug;
+use tracing::{Level, error, info, warn};
 use tracing_subscriber::FmtSubscriber;
 
 /// Get the config file path.
@@ -193,7 +193,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         } => {
             // Background mode: do auth in parent, spawn detached child
             if background {
-                match spawn_daemon(&user, save_password, forget_password, keep_alive, PromptMode::Console).await {
+                match spawn_daemon(
+                    &user,
+                    save_password,
+                    forget_password,
+                    keep_alive,
+                    PromptMode::Console,
+                )
+                .await
+                {
                     Ok(pid) => {
                         println!("VPN running in background (PID: {})", pid);
                         println!("Use 'pmacs-vpn status' to check connection");
@@ -749,7 +757,10 @@ fn spawn_tray_command_handler(
                     // Only proceed if health monitor set us to Reconnecting
                     let current = phase.get();
                     if !matches!(current, ConnectionPhase::Reconnecting { .. }) {
-                        info!("Tray: AutoReconnect ignored (phase: {:?}, user intervened)", current);
+                        info!(
+                            "Tray: AutoReconnect ignored (phase: {:?}, user intervened)",
+                            current
+                        );
                         continue;
                     }
 
@@ -1176,9 +1187,11 @@ async fn spawn_daemon(
         } else if state.pid.is_some() {
             // Daemon was running but is now dead - full cleanup
             println!("Cleaning up stale VPN state from previous session...");
-            cleanup_vpn(&state).await.map_err(|e| -> Box<dyn std::error::Error + Send + Sync> {
-                e.to_string().into()
-            })?;
+            cleanup_vpn(&state)
+                .await
+                .map_err(|e| -> Box<dyn std::error::Error + Send + Sync> {
+                    e.to_string().into()
+                })?;
         }
     }
 
@@ -1815,7 +1828,10 @@ async fn connect_vpn_with_token(token: AuthToken) -> Result<(), Box<dyn std::err
     // This closes the race window between parent's IPC check and child startup.
     let preflight_client = pmacs_vpn::ipc::IpcClient::with_path(ipc_path.clone());
     if preflight_client.ping().await.is_ok() {
-        error!("Another VPN daemon is already running on IPC path: {}", ipc_path);
+        error!(
+            "Another VPN daemon is already running on IPC path: {}",
+            ipc_path
+        );
         return Err("Another VPN daemon is already serving IPC".into());
     }
 

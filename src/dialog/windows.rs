@@ -1,13 +1,13 @@
 //! Native Windows dialogs
-use windows::core::{HSTRING, PCWSTR};
 use windows::Win32::Foundation::{BOOL, HWND, WIN32_ERROR};
 use windows::Win32::Security::Credentials::{
-    CredUIPromptForCredentialsW, CREDUI_FLAGS_ALWAYS_SHOW_UI, CREDUI_FLAGS_DO_NOT_PERSIST,
-    CREDUI_FLAGS_GENERIC_CREDENTIALS, CREDUI_INFOW,
+    CREDUI_FLAGS_ALWAYS_SHOW_UI, CREDUI_FLAGS_DO_NOT_PERSIST, CREDUI_FLAGS_GENERIC_CREDENTIALS,
+    CREDUI_INFOW, CredUIPromptForCredentialsW,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
-    MessageBoxW, MB_ICONERROR, MB_ICONINFORMATION, MB_OK,
+    MB_ICONERROR, MB_ICONINFORMATION, MB_OK, MessageBoxW,
 };
+use windows::core::{HSTRING, PCWSTR};
 
 /// Prompt for credentials - using native Windows CredUI
 pub fn prompt_credentials(title: &str, message: &str) -> Option<(String, String)> {
@@ -32,7 +32,7 @@ fn prompt_creds_internal(
     if let Some(user) = username {
         let user_wide: Vec<u16> = user.encode_utf16().chain(std::iter::once(0)).collect();
         if user_wide.len() <= username_buf.len() {
-             username_buf[..user_wide.len()].copy_from_slice(&user_wide);
+            username_buf[..user_wide.len()].copy_from_slice(&user_wide);
         }
     }
 
@@ -68,8 +68,9 @@ fn prompt_creds_internal(
         )
     };
 
-    if result == WIN32_ERROR(0) { // NO_ERROR
-         let username = String::from_utf16_lossy(&username_buf)
+    if result == WIN32_ERROR(0) {
+        // NO_ERROR
+        let username = String::from_utf16_lossy(&username_buf)
             .trim_matches(char::from(0))
             .to_string();
         let password = String::from_utf16_lossy(&password_buf)
@@ -85,7 +86,7 @@ fn prompt_creds_internal(
 pub fn show_message(title: &str, message: &str, is_error: bool) {
     let title = HSTRING::from(title);
     let message = HSTRING::from(message);
-    
+
     let icon = if is_error {
         MB_ICONERROR
     } else {
@@ -93,6 +94,11 @@ pub fn show_message(title: &str, message: &str, is_error: bool) {
     };
 
     unsafe {
-        MessageBoxW(HWND(std::ptr::null_mut()), PCWSTR::from_raw(message.as_ptr()), PCWSTR::from_raw(title.as_ptr()), MB_OK | icon);
+        MessageBoxW(
+            HWND(std::ptr::null_mut()),
+            PCWSTR::from_raw(message.as_ptr()),
+            PCWSTR::from_raw(title.as_ptr()),
+            MB_OK | icon,
+        );
     }
 }
