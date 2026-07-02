@@ -10,7 +10,7 @@
 // ============================================================================
 
 mod singleton {
-    use pmacs_vpn::singleton::{acquire_tray_lock, TrayLock};
+    use pmacs_vpn::singleton::{TrayLock, acquire_tray_lock};
 
     // BREAKS IF: first tray launch always fails, user can never start the tray
     #[test]
@@ -27,7 +27,10 @@ mod singleton {
         let _lock1 = acquire_tray_lock().expect("First lock must succeed");
         let result = acquire_tray_lock();
 
-        assert!(result.is_err(), "Second lock acquisition must fail while first is held");
+        assert!(
+            result.is_err(),
+            "Second lock acquisition must fail while first is held"
+        );
         let err_msg = result.err().expect("Expected Err variant");
         // The error must tell the user WHY it failed — not just a generic error
         assert!(
@@ -210,7 +213,10 @@ mod connection_phase {
             &ConnectionPhase::Reconnecting { attempt: 1 },
             ConnectionPhase::Connecting,
         );
-        assert!(ok, "Reconnecting{{attempt:1}} -> Connecting must succeed when attempt matches");
+        assert!(
+            ok,
+            "Reconnecting{{attempt:1}} -> Connecting must succeed when attempt matches"
+        );
         assert_eq!(tracker.get(), ConnectionPhase::Connecting);
     }
 
@@ -390,7 +396,10 @@ mod connection_phase {
     fn reconnecting_phases_with_different_attempts_are_not_equal() {
         let a = ConnectionPhase::Reconnecting { attempt: 1 };
         let b = ConnectionPhase::Reconnecting { attempt: 2 };
-        assert_ne!(a, b, "Reconnecting with different attempts must not be equal");
+        assert_ne!(
+            a, b,
+            "Reconnecting with different attempts must not be equal"
+        );
     }
 
     // BREAKS IF: same variant doesn't equal itself, breaking CAS
@@ -404,7 +413,7 @@ mod connection_phase {
     // BREAKS IF: different variant types compare as equal
     #[test]
     fn different_variants_are_not_equal() {
-        let variants = vec![
+        let variants = [
             ConnectionPhase::Idle,
             ConnectionPhase::Connecting,
             ConnectionPhase::Connected,
@@ -569,10 +578,16 @@ mod connection_phase {
             ConnectionPhase::Reconnecting { attempt: 1 },
         );
         assert!(ok, "Health monitor: Connected -> Reconnecting must succeed");
-        assert_eq!(command_handler.get(), ConnectionPhase::Reconnecting { attempt: 1 });
+        assert_eq!(
+            command_handler.get(),
+            ConnectionPhase::Reconnecting { attempt: 1 }
+        );
 
         // Command handler picks up AutoReconnect, verifies phase
-        assert!(matches!(command_handler.get(), ConnectionPhase::Reconnecting { .. }));
+        assert!(matches!(
+            command_handler.get(),
+            ConnectionPhase::Reconnecting { .. }
+        ));
 
         // Command handler sets Connecting then Connected
         command_handler.set(ConnectionPhase::Connecting);
@@ -599,7 +614,8 @@ mod connection_phase {
         command_handler.set(ConnectionPhase::Disconnecting);
 
         // Health monitor checks after sleep — phase is no longer Reconnecting
-        let still_reconnecting = matches!(health_monitor.get(), ConnectionPhase::Reconnecting { .. });
+        let still_reconnecting =
+            matches!(health_monitor.get(), ConnectionPhase::Reconnecting { .. });
         assert!(
             !still_reconnecting,
             "Health monitor must see user's Disconnecting, stop reconnecting"
@@ -610,7 +626,10 @@ mod connection_phase {
             &ConnectionPhase::Connected,
             ConnectionPhase::Reconnecting { attempt: 2 },
         );
-        assert!(!ok, "CAS must fail because phase is Disconnecting, not Connected");
+        assert!(
+            !ok,
+            "CAS must fail because phase is Disconnecting, not Connected"
+        );
     }
 }
 

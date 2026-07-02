@@ -20,7 +20,10 @@ mod platform {
 
     impl TrayLock {
         pub fn acquire() -> Result<Self, String> {
-            let wide: Vec<u16> = MUTEX_NAME.encode_utf16().chain(std::iter::once(0)).collect();
+            let wide: Vec<u16> = MUTEX_NAME
+                .encode_utf16()
+                .chain(std::iter::once(0))
+                .collect();
 
             unsafe {
                 let handle = CreateMutexW(None, true, PCWSTR::from_raw(wide.as_ptr()))
@@ -61,8 +64,7 @@ mod platform {
     }
 
     fn lock_path() -> Result<PathBuf, String> {
-        let home = std::env::var("HOME")
-            .map_err(|_| "HOME not set".to_string())?;
+        let home = std::env::var("HOME").map_err(|_| "HOME not set".to_string())?;
         let dir = PathBuf::from(home).join(".pmacs-vpn");
         if !dir.exists() {
             std::fs::create_dir_all(&dir)
@@ -95,7 +97,10 @@ mod platform {
 
             // Non-blocking exclusive lock; Flock guard keeps the lock held
             match Flock::lock(owned_fd, FlockArg::LockExclusiveNonblock) {
-                Ok(flock) => Ok(TrayLock { _flock: flock, path }),
+                Ok(flock) => Ok(TrayLock {
+                    _flock: flock,
+                    path,
+                }),
                 Err(_) => Err("Another tray instance is already running".to_string()),
             }
         }

@@ -97,10 +97,7 @@ mod tests {
     fn test_transition_succeeds_on_match() {
         let tracker = PhaseTracker::new();
         tracker.set(ConnectionPhase::Connected);
-        let ok = tracker.transition(
-            &ConnectionPhase::Connected,
-            ConnectionPhase::Disconnecting,
-        );
+        let ok = tracker.transition(&ConnectionPhase::Connected, ConnectionPhase::Disconnecting);
         assert!(ok);
         assert_eq!(tracker.get(), ConnectionPhase::Disconnecting);
     }
@@ -109,10 +106,7 @@ mod tests {
     fn test_transition_fails_on_mismatch() {
         let tracker = PhaseTracker::new();
         tracker.set(ConnectionPhase::Idle);
-        let ok = tracker.transition(
-            &ConnectionPhase::Connected,
-            ConnectionPhase::Disconnecting,
-        );
+        let ok = tracker.transition(&ConnectionPhase::Connected, ConnectionPhase::Disconnecting);
         assert!(!ok);
         assert_eq!(tracker.get(), ConnectionPhase::Idle);
     }
