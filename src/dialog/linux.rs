@@ -29,17 +29,17 @@ fn has_kdialog() -> bool {
 /// Prompt for credentials using zenity or kdialog
 pub fn prompt_credentials(title: &str, _message: &str) -> Option<(String, String)> {
     // Try zenity first
-    if has_zenity() {
-        if let Some(creds) = prompt_zenity(title) {
-            return Some(creds);
-        }
+    if has_zenity()
+        && let Some(creds) = prompt_zenity(title)
+    {
+        return Some(creds);
     }
 
     // Fall back to kdialog
-    if has_kdialog() {
-        if let Some(creds) = prompt_kdialog(title) {
-            return Some(creds);
-        }
+    if has_kdialog()
+        && let Some(creds) = prompt_kdialog(title)
+    {
+        return Some(creds);
     }
 
     tracing::warn!("No dialog tool available (zenity or kdialog)");
