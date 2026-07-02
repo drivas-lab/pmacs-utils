@@ -193,7 +193,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         } => {
             // Background mode: do auth in parent, spawn detached child
             if background {
-                match spawn_daemon(&user, save_password, forget_password, keep_alive).await {
+                match spawn_daemon(&user, save_password, forget_password, keep_alive, PromptMode::Console).await {
                     Ok(pid) => {
                         println!("VPN running in background (PID: {})", pid);
                         println!("Use 'pmacs-vpn status' to check connection");
@@ -569,7 +569,7 @@ fn tray_connect(rt: &tokio::runtime::Handle) -> Result<String, String> {
     ensure_cached_tray_credentials()?;
 
     let pid = rt
-        .block_on(spawn_daemon(&None, false, false, true))
+        .block_on(spawn_daemon(&None, false, false, true, PromptMode::Dialog))
         .map_err(|e| e.to_string())?;
     if pid > 0 {
         info!("Tray: VPN daemon started (PID {})", pid);
@@ -1156,6 +1156,7 @@ async fn spawn_daemon(
     save_password: bool,
     forget_password: bool,
     keep_alive: bool,
+    prompt_mode: PromptMode,
 ) -> Result<u32, Box<dyn std::error::Error + Send + Sync>> {
     use std::process::Command;
 
@@ -1223,7 +1224,7 @@ async fn spawn_daemon(
 
     // 4. Get password (from keychain or prompt)
     let (mut password, mut was_cached) =
-        get_vpn_password(&username, forget_password).map_err(|e| e.to_string())?;
+        get_vpn_password(&username, forget_password, prompt_mode).map_err(|e| e.to_string())?;
 
     // 5. Do auth flow
     println!("Authenticating...");
@@ -1236,7 +1237,12 @@ async fn spawn_daemon(
     // Login loop with password retry on auth failure
     let login = loop {
         let duo_passcode = if *duo_method == pmacs_vpn::DuoMethod::Passcode {
-            let code = rpassword::prompt_password("DUO passcode: ")?;
+            let code = prompt_secret(
+                prompt_mode,
+                "DUO passcode: ",
+                "PMACS VPN \u{2014} enter your DUO passcode",
+                &username,
+            )?;
             Some(code)
         } else {
             None
@@ -1256,8 +1262,12 @@ async fn spawn_daemon(
                     eprintln!("(Saved password may be stale)");
                 }
                 eprintln!();
-                let prompt = format!("Password for {}: ", username);
-                password = rpassword::prompt_password(&prompt)?;
+                password = prompt_secret(
+                    prompt_mode,
+                    &format!("Password for {}: ", username),
+                    "PMACS VPN \u{2014} login failed, saved password may be stale",
+                    &username,
+                )?;
                 was_cached = false;
                 continue;
             }
@@ -1267,7 +1277,13 @@ async fn spawn_daemon(
     println!("Login successful!");
 
     // 6. Save password if requested or offer to save
-    let should_save = prompt_save_password(save_password, was_cached).map_err(|e| e.to_string())?;
+    let should_save = match resolve_save_decision(prompt_mode, save_password, was_cached) {
+        SaveDecision::Save => true,
+        SaveDecision::Skip => false,
+        SaveDecision::AskConsole => {
+            prompt_save_password(save_password, was_cached).map_err(|e| e.to_string())?
+        }
+    };
 
     if should_save {
         match pmacs_vpn::store_password(&username, &password) {
@@ -1372,7 +1388,11 @@ fn prompt(label: &str, default: Option<&str>) -> String {
 
 /// Get VPN password from keychain or prompt user
 /// Returns (password, was_cached) where was_cached indicates if password came from keychain
-fn get_vpn_password(username: &str, forget_password: bool) -> Result<(String, bool), String> {
+fn get_vpn_password(
+    username: &str,
+    forget_password: bool,
+    prompt_mode: PromptMode,
+) -> Result<(String, bool), String> {
     #[cfg(target_os = "macos")]
     {
         // On macOS, accessing the keychain may trigger a system dialog.
@@ -1381,27 +1401,21 @@ fn get_vpn_password(username: &str, forget_password: bool) -> Result<(String, bo
     }
 
     if !forget_password {
-        match pmacs_vpn::get_password(username) {
-            Some(stored) => {
-                println!("Using saved password from keychain");
-                Ok((stored, true))
-            }
-            None => {
-                println!("No saved VPN password found.");
-                println!("Enter your PMACS VPN password (for GlobalProtect, not SSH):");
-                let prompt = format!("Password for {}: ", username);
-                let password = rpassword::prompt_password(&prompt)
-                    .map_err(|e| format!("Failed to read password: {}", e))?;
-                Ok((password, false))
-            }
+        if let Some(stored) = pmacs_vpn::get_password(username) {
+            println!("Using saved password from keychain");
+            return Ok((stored, true));
         }
-    } else {
-        println!("Enter your PMACS VPN password (for GlobalProtect, not SSH):");
-        let prompt = format!("Password for {}: ", username);
-        let password = rpassword::prompt_password(&prompt)
-            .map_err(|e| format!("Failed to read password: {}", e))?;
-        Ok((password, false))
+        println!("No saved VPN password found.");
     }
+
+    println!("Enter your PMACS VPN password (for GlobalProtect, not SSH):");
+    let password = prompt_secret(
+        prompt_mode,
+        &format!("Password for {}: ", username),
+        "PMACS VPN \u{2014} enter your VPN password (GlobalProtect)",
+        username,
+    )?;
+    Ok((password, false))
 }
 
 /// Determine if password should be saved to keychain
@@ -1529,7 +1543,8 @@ async fn connect_vpn(
     }
 
     // 4. Get password (from keychain or prompt)
-    let (mut password, mut was_cached) = get_vpn_password(&username, forget_password)?;
+    let (mut password, mut was_cached) =
+        get_vpn_password(&username, forget_password, PromptMode::Console)?;
 
     // 5. Auth flow
     println!("Authenticating...");
