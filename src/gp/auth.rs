@@ -812,7 +812,10 @@ mod tests {
             Some("Invalid username or password".to_string())
         );
         // Non-error responses return None
-        assert_eq!(parse_error(r#"<jnlp><application-desc></application-desc></jnlp>"#), None);
+        assert_eq!(
+            parse_error(r#"<jnlp><application-desc></application-desc></jnlp>"#),
+            None
+        );
         assert_eq!(parse_error(r#"var respStatus = "Challenge";"#), None);
     }
 
