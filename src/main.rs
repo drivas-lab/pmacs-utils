@@ -501,7 +501,10 @@ fn prompt_secret(
     }
 }
 
-fn ensure_cached_tray_credentials() -> Result<(), String> {
+/// Pre-flight for tray connect: config and username must exist (first-time
+/// setup still requires the CLI). A missing/stale password is fine — the
+/// connect flow prompts via native dialog.
+fn ensure_tray_config() -> Result<(), String> {
     let config_path = get_config_path();
     if !config_path.exists() {
         return Err("No config file. Run 'pmacs-vpn connect' first.".to_string());
@@ -509,11 +512,8 @@ fn ensure_cached_tray_credentials() -> Result<(), String> {
 
     let config =
         pmacs_vpn::Config::load(&config_path).map_err(|e| format!("Config error: {}", e))?;
-    let username = config.vpn.username.clone().unwrap_or_default();
-    if username.is_empty() || pmacs_vpn::get_password(&username).is_none() {
-        return Err(
-            "No cached password. Run 'pmacs-vpn connect --save-password' first.".to_string(),
-        );
+    if config.vpn.username.clone().unwrap_or_default().is_empty() {
+        return Err("No username in config. Run 'pmacs-vpn connect' first.".to_string());
     }
 
     Ok(())
@@ -566,7 +566,7 @@ fn best_effort_admin_cleanup(rt: &tokio::runtime::Handle) -> Result<(), String> 
 }
 
 fn tray_connect(rt: &tokio::runtime::Handle) -> Result<String, String> {
-    ensure_cached_tray_credentials()?;
+    ensure_tray_config()?;
 
     let pid = rt
         .block_on(spawn_daemon(&None, false, false, true, PromptMode::Dialog))
