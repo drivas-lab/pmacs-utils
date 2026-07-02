@@ -451,6 +451,56 @@ fn load_tray_startup_config(launched_at_login: bool) -> TrayStartupConfig {
     }
 }
 
+/// How interactive prompts are presented to the user.
+#[derive(Copy, Clone, PartialEq, Debug)]
+enum PromptMode {
+    /// Console prompts via rpassword/stdin (CLI usage)
+    Console,
+    /// Native OS dialogs (tray usage — no usable console)
+    Dialog,
+}
+
+/// What to do with a password after a successful login.
+#[derive(Debug, PartialEq)]
+enum SaveDecision {
+    Save,
+    Skip,
+    AskConsole,
+}
+
+/// Decide whether to save the password to the keychain after successful auth.
+/// Dialog mode auto-saves newly entered passwords (a tray user cannot answer
+/// a console [Y/n] question); passwords that failed auth never reach this.
+fn resolve_save_decision(mode: PromptMode, save_flag: bool, was_cached: bool) -> SaveDecision {
+    if save_flag {
+        return SaveDecision::Save;
+    }
+    if was_cached {
+        return SaveDecision::Skip;
+    }
+    match mode {
+        PromptMode::Dialog => SaveDecision::Save,
+        PromptMode::Console => SaveDecision::AskConsole,
+    }
+}
+
+/// Prompt for a secret in the given mode. Dialog cancel (or a platform
+/// without dialog support, e.g. macOS tray) becomes an Err so callers fail
+/// cleanly instead of hanging on a console that nobody is watching.
+fn prompt_secret(
+    mode: PromptMode,
+    console_prompt: &str,
+    dialog_title: &str,
+    username: &str,
+) -> Result<String, String> {
+    match mode {
+        PromptMode::Console => rpassword::prompt_password(console_prompt)
+            .map_err(|e| format!("Failed to read password: {}", e)),
+        PromptMode::Dialog => pmacs_vpn::dialog::prompt_password(dialog_title, username)
+            .ok_or_else(|| "Password entry cancelled".to_string()),
+    }
+}
+
 fn ensure_cached_tray_credentials() -> Result<(), String> {
     let config_path = get_config_path();
     if !config_path.exists() {
@@ -1974,4 +2024,49 @@ async fn cleanup_vpn(state: &pmacs_vpn::VpnState) -> Result<(), Box<dyn std::err
     pmacs_vpn::VpnState::delete()?;
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn save_flag_forces_save_in_both_modes() {
+        assert_eq!(
+            resolve_save_decision(PromptMode::Console, true, true),
+            SaveDecision::Save
+        );
+        assert_eq!(
+            resolve_save_decision(PromptMode::Dialog, true, true),
+            SaveDecision::Save
+        );
+    }
+
+    #[test]
+    fn cached_password_skips_save_in_both_modes() {
+        assert_eq!(
+            resolve_save_decision(PromptMode::Console, false, true),
+            SaveDecision::Skip
+        );
+        assert_eq!(
+            resolve_save_decision(PromptMode::Dialog, false, true),
+            SaveDecision::Skip
+        );
+    }
+
+    #[test]
+    fn dialog_mode_autosaves_newly_entered_password() {
+        assert_eq!(
+            resolve_save_decision(PromptMode::Dialog, false, false),
+            SaveDecision::Save
+        );
+    }
+
+    #[test]
+    fn console_mode_asks_before_saving_new_password() {
+        assert_eq!(
+            resolve_save_decision(PromptMode::Console, false, false),
+            SaveDecision::AskConsole
+        );
+    }
 }
