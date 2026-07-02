@@ -26,10 +26,11 @@ echo "Running PMACS VPN quality gate..."
 run cargo fmt --check
 run cargo check
 run cargo clippy --all-targets -- -D warnings
-run cargo test --lib
+# Singleton tests contend on the production lock; they need serial execution.
+run cargo test --lib -- --test-threads=1
 
 if [[ "$QUICK" -eq 0 ]]; then
-  run cargo test
+  run cargo test -- --test-threads=1
 fi
 
 HOST_UNAME="$(uname -s 2>/dev/null || echo unknown)"
