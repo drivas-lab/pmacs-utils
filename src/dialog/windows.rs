@@ -1,6 +1,6 @@
 //! Native Windows dialogs
 use windows::core::{HSTRING, PCWSTR};
-use windows::Win32::Foundation::{BOOL, HWND};
+use windows::Win32::Foundation::{BOOL, HWND, WIN32_ERROR};
 use windows::Win32::Security::Credentials::{
     CredUIPromptForCredentialsW, CREDUI_FLAGS_ALWAYS_SHOW_UI, CREDUI_FLAGS_DO_NOT_PERSIST,
     CREDUI_FLAGS_GENERIC_CREDENTIALS, CREDUI_INFOW,
@@ -41,7 +41,7 @@ fn prompt_creds_internal(
 
     let info = CREDUI_INFOW {
         cbSize: std::mem::size_of::<CREDUI_INFOW>() as u32,
-        hwndParent: HWND(0),
+        hwndParent: HWND(std::ptr::null_mut()),
         pszMessageText: if message.is_empty() {
             PCWSTR::null()
         } else {
@@ -61,14 +61,14 @@ fn prompt_creds_internal(
             PCWSTR::null(),
             None,
             0,
-            Some(&mut username_buf),
-            Some(&mut password_buf),
+            &mut username_buf,
+            &mut password_buf,
             Some(&mut save),
             flags,
         )
     };
 
-    if result == 0 { // NO_ERROR
+    if result == WIN32_ERROR(0) { // NO_ERROR
          let username = String::from_utf16_lossy(&username_buf)
             .trim_matches(char::from(0))
             .to_string();
@@ -93,6 +93,6 @@ pub fn show_message(title: &str, message: &str, is_error: bool) {
     };
 
     unsafe {
-        MessageBoxW(HWND(0), PCWSTR::from_raw(message.as_ptr()), PCWSTR::from_raw(title.as_ptr()), MB_OK | icon);
+        MessageBoxW(HWND(std::ptr::null_mut()), PCWSTR::from_raw(message.as_ptr()), PCWSTR::from_raw(title.as_ptr()), MB_OK | icon);
     }
 }
