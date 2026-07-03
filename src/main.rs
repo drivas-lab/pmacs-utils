@@ -2339,4 +2339,196 @@ mod tests {
             SaveDecision::AskConsole
         );
     }
+
+    // -- Acceptance tests: tray adoption of externally-established sessions --
+    // Authored independently from docs/design acceptance criteria and this
+    // file's production source, not from the implementer's own unit tests
+    // above. Run with: cargo test --bin pmacs-vpn acceptance_
+
+    #[test]
+    fn acceptance_idle_session_established_outside_tray_is_adopted_after_two_matching_sightings() {
+        // A session started by the CLI, or by a daemon with no IPC server
+        // but a valid state file and a live PID, must still turn the tray
+        // green. Drive PhaseTracker, monitor_action, and AdoptionDebounce
+        // together the way spawn_tray_health_monitor's loop body does,
+        // substituting a synthetic probe result for a real IpcClient.
+        let phase = PhaseTracker::new();
+        assert_eq!(phase.get(), ConnectionPhase::Idle);
+        let mut adoption = AdoptionDebounce::new();
+        let gateway = "198.51.100.7".to_string();
+
+        match monitor_action(&phase.get(), Some(gateway.clone())) {
+            MonitorAction::AdoptConnected(ip) => {
+                assert_eq!(
+                    adoption.observe(ip),
+                    None,
+                    "must not adopt on a single sighting"
+                );
+            }
+            other => panic!(
+                "expected AdoptConnected on the first sighting, got {:?}",
+                other
+            ),
+        }
+        assert_eq!(phase.get(), ConnectionPhase::Idle);
+
+        match monitor_action(&phase.get(), Some(gateway.clone())) {
+            MonitorAction::AdoptConnected(ip) => {
+                let confirmed = adoption
+                    .observe(ip)
+                    .expect("second consecutive sighting of the same gateway must confirm");
+                assert_eq!(confirmed, gateway);
+                assert!(phase.transition(&ConnectionPhase::Idle, ConnectionPhase::Connected));
+            }
+            other => panic!(
+                "expected AdoptConnected on the second sighting, got {:?}",
+                other
+            ),
+        }
+        assert_eq!(phase.get(), ConnectionPhase::Connected);
+    }
+
+    #[test]
+    fn acceptance_tracked_session_recovery_begins_when_daemon_disappears() {
+        // A session the tray believes is Connected whose daemon vanishes
+        // (no IPC, no live state file) must trigger recovery.
+        let phase = PhaseTracker::new();
+        phase.set(ConnectionPhase::Connected);
+
+        assert_eq!(
+            monitor_action(&phase.get(), None),
+            MonitorAction::BeginRecovery
+        );
+    }
+
+    #[test]
+    fn acceptance_healthy_tracked_session_is_left_alone() {
+        // A session the tray believes is Connected, still reporting a live
+        // gateway, must not be disturbed by the monitor.
+        let phase = PhaseTracker::new();
+        phase.set(ConnectionPhase::Connected);
+
+        assert_eq!(
+            monitor_action(&phase.get(), Some("203.0.113.4".to_string())),
+            MonitorAction::Stand
+        );
+        assert_eq!(phase.get(), ConnectionPhase::Connected);
+    }
+
+    #[test]
+    fn acceptance_transitional_phases_are_never_touched_by_the_monitor() {
+        // While a user-initiated action (Connecting/Disconnecting/
+        // Reconnecting) is in flight, the monitor must not adopt, recover,
+        // or otherwise act, regardless of what the probe reports.
+        let transitional = [
+            ConnectionPhase::Connecting,
+            ConnectionPhase::Disconnecting,
+            ConnectionPhase::Reconnecting { attempt: 3 },
+        ];
+        for phase in transitional {
+            assert_eq!(
+                monitor_action(&phase, Some("192.0.2.9".to_string())),
+                MonitorAction::Stand,
+                "phase {:?} with a live gateway must Stand",
+                phase
+            );
+            assert_eq!(
+                monitor_action(&phase, None),
+                MonitorAction::Stand,
+                "phase {:?} with no live daemon must Stand",
+                phase
+            );
+        }
+    }
+
+    #[test]
+    fn acceptance_adoption_does_not_fire_on_a_single_sighting() {
+        let mut adoption = AdoptionDebounce::new();
+        assert_eq!(adoption.observe("198.51.100.20".to_string()), None);
+    }
+
+    #[test]
+    fn acceptance_adoption_restarts_when_gateway_differs_between_sightings() {
+        // A stale state file from a torn-down daemon must not chain with a
+        // sighting of a genuinely different session; a differing gateway
+        // restarts the wait instead of confirming across the mismatch.
+        let mut adoption = AdoptionDebounce::new();
+        assert_eq!(adoption.observe("198.51.100.20".to_string()), None);
+        assert_eq!(adoption.observe("198.51.100.21".to_string()), None);
+        assert_eq!(
+            adoption.observe("198.51.100.21".to_string()),
+            Some("198.51.100.21".to_string())
+        );
+    }
+
+    #[test]
+    fn acceptance_adoption_restarts_after_explicit_reset() {
+        // reset() is what the monitor calls whenever the phase disagrees
+        // or recovery begins; a pending sighting must not survive it.
+        let mut adoption = AdoptionDebounce::new();
+        assert_eq!(adoption.observe("198.51.100.20".to_string()), None);
+        adoption.reset();
+        assert_eq!(adoption.observe("198.51.100.20".to_string()), None);
+        assert_eq!(
+            adoption.observe("198.51.100.20".to_string()),
+            Some("198.51.100.20".to_string())
+        );
+    }
+
+    #[test]
+    fn acceptance_confirmed_adoption_is_not_latched_and_requires_reconfirmation() {
+        // A confirmation must consume the pending sighting; it is not a
+        // one-time switch after which every later single sighting counts
+        // as confirmed too.
+        let mut adoption = AdoptionDebounce::new();
+        assert_eq!(adoption.observe("198.51.100.20".to_string()), None);
+        assert_eq!(
+            adoption.observe("198.51.100.20".to_string()),
+            Some("198.51.100.20".to_string())
+        );
+        assert_eq!(adoption.observe("198.51.100.20".to_string()), None);
+    }
+
+    #[test]
+    fn acceptance_probe_live_daemon_falls_back_to_state_file_and_pid_check_when_ipc_fails() {
+        // probe_live_daemon must not treat IPC as the only source of truth:
+        // a daemon predating the IPC server, or a transiently unavailable
+        // socket, still leaves an authoritative state file, and the probe
+        // must consult it after an IPC failure. IPC and on-disk daemon
+        // state cannot be faked from a unit test, so this checks the
+        // fallback structurally (precedent:
+        // no_auth_log_line_interpolates_a_raw_response_body in src/gp/auth.rs).
+        let src = include_str!("main.rs");
+        let start = src
+            .find("async fn probe_live_daemon")
+            .expect("probe_live_daemon must exist in main.rs");
+        let after_start = &src[start..];
+        let end = after_start
+            .find("\nfn spawn_tray_health_monitor")
+            .expect("probe_live_daemon body must be followed by spawn_tray_health_monitor");
+        let body = &after_start[..end];
+
+        let ipc_pos = body
+            .find("ipc_client.get_status()")
+            .expect("probe_live_daemon must attempt the IPC status call first");
+        let state_pos = body
+            .find("VpnState::load()")
+            .expect("probe_live_daemon must fall back to VpnState::load() when IPC fails");
+        let pid_pos = body
+            .find("is_daemon_running()")
+            .expect("probe_live_daemon must gate the state-file fallback on a live PID check");
+
+        assert!(
+            ipc_pos < state_pos,
+            "the state-file fallback must run after the IPC attempt, not before it"
+        );
+        assert!(
+            state_pos < pid_pos,
+            "the running-PID check must gate the loaded state, not race ahead of it"
+        );
+        assert!(
+            body.contains("state.gateway"),
+            "the fallback path must surface the gateway from the loaded state, not a placeholder"
+        );
+    }
 }
