@@ -751,5 +751,201 @@ mod tests {
         );
     }
 
+    // ------------------------------------------------------------------
+    // Acceptance: socket buffer tuning (criterion 1)
+    // ------------------------------------------------------------------
+
+    // BREAKS IF: someone lowers the buffer-tuning target below the ~4 MiB
+    // that a 200ms-RTT gateway path needs to clear 1 MB/s, silently
+    // undoing the throughput fix without any test noticing.
+    #[test]
+    fn acceptance_socket_buffer_target_is_four_mebibytes() {
+        assert_eq!(
+            SOCKET_BUFFER_BYTES,
+            4 * 1024 * 1024,
+            "the requested gateway socket buffer size drifted from the ~4 MiB target"
+        );
+    }
+
+    // BREAKS IF: the buffer-tuning call reports back a size close to the
+    // OS stock default (a few hundred KB), meaning the enlarge request
+    // isn't actually taking effect.
+    #[tokio::test]
+    async fn acceptance_tune_socket_buffers_reports_well_above_stock_default() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let (client, server) = tokio::join!(TcpStream::connect(addr), listener.accept());
+        let client = client.unwrap();
+        let _server = server.unwrap();
+
+        let (snd, rcv) = tune_socket_buffers(&client);
+        // Comfortably above typical OS defaults (commonly 128-256 KiB) but
+        // well below the 4 MiB ask, so this holds even on hosts whose
+        // kernel caps the grant below the full request.
+        assert!(
+            snd >= 1024 * 1024,
+            "send buffer ({snd} bytes) is not meaningfully enlarged"
+        );
+        assert!(
+            rcv >= 1024 * 1024,
+            "recv buffer ({rcv} bytes) is not meaningfully enlarged"
+        );
+    }
+
+    // BREAKS IF: connecting fails outright when the kernel won't grant the
+    // full requested buffer size - tune_socket_buffers must swallow a
+    // setsockopt rejection/clamp and still hand back concrete sizes rather
+    // than propagating an error up through connect().
+    #[tokio::test]
+    async fn acceptance_tune_socket_buffers_completes_even_after_a_kernel_side_rejection() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let (client, server) = tokio::join!(TcpStream::connect(addr), listener.accept());
+        let client = client.unwrap();
+        let _server = server.unwrap();
+
+        // Force a request far beyond any real ceiling first, on the same
+        // socket, so the kernel either errors or silently clamps - the
+        // same class of outcome an under-provisioned host would produce
+        // for the production 4 MiB ask.
+        let sock = socket2::SockRef::from(&client);
+        let absurd = 64usize * 1024 * 1024 * 1024; // 64 GiB
+        let _ = sock.set_send_buffer_size(absurd);
+        let _ = sock.set_recv_buffer_size(absurd);
+
+        // The production function must still return normally with
+        // concrete, positive sizes - not panic, not hang, not fail the
+        // caller.
+        let (snd, rcv) = tune_socket_buffers(&client);
+        assert!(
+            snd > 0,
+            "send buffer size must be reported even after a rejected/clamped prior request"
+        );
+        assert!(
+            rcv > 0,
+            "recv buffer size must be reported even after a rejected/clamped prior request"
+        );
+    }
+
+    // ------------------------------------------------------------------
+    // Acceptance: wedge detection at the tunnel's real thresholds
+    // (criterion 3) - independent of the implementer's own
+    // WedgeDetector::new(2000, 3) unit tests above, exercised with the
+    // exact production constants SslTunnel wires in.
+    // ------------------------------------------------------------------
+
+    // BREAKS IF: a session sitting at exactly the 2000ms threshold for
+    // three checks never trips, leaving a wedged-but-alive tunnel
+    // undetected because the boundary was implemented as strictly ">".
+    #[test]
+    fn acceptance_wedge_trips_at_exactly_the_threshold_after_three_strikes() {
+        let mut d = WedgeDetector::new(WEDGE_RTT_THRESHOLD_MS, WEDGE_STRIKES);
+        assert!(!d.record(Some(WEDGE_RTT_THRESHOLD_MS)));
+        assert!(!d.record(Some(WEDGE_RTT_THRESHOLD_MS)));
+        assert!(
+            d.record(Some(WEDGE_RTT_THRESHOLD_MS)),
+            "three consecutive samples at exactly the threshold must trip the detector"
+        );
+    }
+
+    // BREAKS IF: a sample one millisecond under the threshold is
+    // mistakenly treated as a strike, causing false-positive rebuilds on a
+    // merely-slow-but-healthy path.
+    #[test]
+    fn acceptance_wedge_one_ms_under_threshold_never_trips_and_resets_strikes() {
+        let mut d = WedgeDetector::new(WEDGE_RTT_THRESHOLD_MS, WEDGE_STRIKES);
+        d.record(Some(WEDGE_RTT_THRESHOLD_MS));
+        d.record(Some(WEDGE_RTT_THRESHOLD_MS));
+        assert!(
+            !d.record(Some(WEDGE_RTT_THRESHOLD_MS - 1)),
+            "a sample under the threshold must not itself count as a strike"
+        );
+        // The under-threshold sample must have reset the streak, so two
+        // more at-threshold samples (not three) must not yet trip it.
+        assert!(!d.record(Some(WEDGE_RTT_THRESHOLD_MS)));
+        assert!(!d.record(Some(WEDGE_RTT_THRESHOLD_MS)));
+    }
+
+    // BREAKS IF: an RTT sample that couldn't be read (None - e.g. a
+    // getsockopt failure) is treated as either a strike or a reset,
+    // instead of being ignored outright as the spec requires.
+    #[test]
+    fn acceptance_wedge_none_sample_is_fully_neutral() {
+        let mut d = WedgeDetector::new(WEDGE_RTT_THRESHOLD_MS, WEDGE_STRIKES);
+        assert!(!d.record(Some(9000))); // strike 1 of 3
+        assert!(!d.record(Some(9000))); // strike 2 of 3
+        assert!(
+            !d.record(None),
+            "a missing sample must not itself trip the detector"
+        );
+        assert!(
+            !d.record(None),
+            "repeated missing samples must not accumulate strikes"
+        );
+        // The two real strikes recorded before the None samples must still
+        // be live; this third strike should now trip it.
+        assert!(
+            d.record(Some(9000)),
+            "None samples must not have reset the two prior strikes"
+        );
+    }
+
+    // ------------------------------------------------------------------
+    // Acceptance: outbound batching at the exact private helper the
+    // SslTunnel::run select! loop calls per queued TUN packet (criterion 2,
+    // wiring-level proxy for the public-API batching tests in
+    // tests/tunnel_hardening_acceptance.rs).
+    // ------------------------------------------------------------------
+
+    // BREAKS IF: draining several queued outbound TUN reads into the
+    // shared out_buf (as SslTunnel::run does before a single
+    // stream.write_all) reorders or corrupts a frame relative to a
+    // packet sent on its own.
+    #[test]
+    fn acceptance_encode_ip_packet_batches_preserve_order_and_are_individually_decodable() {
+        // Minimal but version-valid IPv4/IPv6 payloads (only the version
+        // nibble in the first byte is inspected by from_ip_packet).
+        let raw_packets: Vec<Vec<u8>> = vec![
+            vec![0x45, 0x00, 0x00, 0x1c, 0x01],
+            vec![0x60, 0x00, 0x00, 0x00, 0x02],
+            vec![0x45, 0x00, 0x00, 0x1c, 0x03],
+        ];
+
+        let mut out_buf = Vec::new();
+        for raw in &raw_packets {
+            encode_ip_packet(raw, &mut out_buf).expect("valid IP packet must encode");
+        }
+
+        let mut offset = 0;
+        for (i, raw) in raw_packets.iter().enumerate() {
+            let decoded = GpPacket::decode(&out_buf[offset..])
+                .unwrap_or_else(|e| panic!("batched packet {i} failed to decode: {e}"));
+            assert_eq!(
+                decoded.payload, *raw,
+                "batched packet {i} payload does not match what was queued (reordered or corrupted)"
+            );
+            offset += decoded.encode().len();
+        }
+        assert_eq!(offset, out_buf.len());
+    }
+
+    // BREAKS IF: a malformed packet from the TUN device is silently
+    // dropped instead of surfacing an error - the batching loop must be
+    // able to detect it rather than sending a bogus frame to the gateway.
+    #[test]
+    fn acceptance_encode_ip_packet_rejects_an_undecodable_ip_version() {
+        let garbage = vec![0x00, 0x00, 0x00, 0x00]; // version nibble 0: neither v4 nor v6
+        let mut out_buf = Vec::new();
+        let result = encode_ip_packet(&garbage, &mut out_buf);
+        assert!(
+            result.is_err(),
+            "an IP packet with an unrecognized version must not encode silently"
+        );
+        assert!(
+            out_buf.is_empty(),
+            "a rejected packet must not leave partial bytes in the shared batch buffer"
+        );
+    }
+
     // Note: Full tunnel tests require real VPN credentials and are tested manually
 }

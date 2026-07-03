@@ -873,4 +873,94 @@ mod tests {
             r#"<response><esp-disabled>yes</esp-disabled></response>"#
         ));
     }
+
+    // ------------------------------------------------------------------
+    // Acceptance: ESP observability (criterion 4), independent of the
+    // implementer's own test_esp_offered_detection above.
+    // ------------------------------------------------------------------
+
+    // BREAKS IF: a self-closing or attribute-bearing <esp/> tag stops being
+    // recognized as an ESP offer, silently losing the observability signal
+    // for gateways that format the tag this way.
+    #[test]
+    fn acceptance_esp_offered_true_for_open_and_attributed_tags() {
+        assert!(esp_offered(
+            r#"<response><esp><port>4501</port></esp></response>"#
+        ));
+        assert!(esp_offered(
+            r#"<response><esp version="1" udp-port="4501"></esp></response>"#
+        ));
+    }
+
+    // BREAKS IF: a response with no ESP mention at all is misreported as
+    // offering ESP, giving a false positive for gateway capability.
+    #[test]
+    fn acceptance_esp_offered_false_when_no_esp_tag_present() {
+        assert!(!esp_offered(
+            r#"<response><ip-address>10.0.0.5</ip-address><mtu>1400</mtu></response>"#
+        ));
+        assert!(!esp_offered(""));
+    }
+
+    // BREAKS IF: any tag that merely starts with the substring "esp" (not
+    // just the specific <esp-disabled> example) is mistaken for a real
+    // <esp> offer - i.e. the check isn't actually tag-boundary aware.
+    #[test]
+    fn acceptance_esp_prefixed_tags_other_than_esp_itself_do_not_count() {
+        assert!(!esp_offered(
+            r#"<response><esp-disabled>yes</esp-disabled></response>"#
+        ));
+        assert!(!esp_offered(r#"<response><esp-unavailable/></response>"#));
+        assert!(!esp_offered(
+            r#"<response><espionage>true</espionage></response>"#
+        ));
+    }
+
+    // BREAKS IF: getconfig_impl's ESP logging is deleted, stops covering
+    // both the offered and not-offered branches, or starts interpolating
+    // the raw response body (which carries session key material) into any
+    // log line instead of only its length or the boolean ESP predicate.
+    // Static source check: constructing a live TLS gateway to observe real
+    // tracing output isn't available in this environment (getconfig_impl
+    // always dials `https://{gateway}/...` with strict cert validation, so
+    // there is no seam to inject a local mock endpoint without touching
+    // production code). This scans the actual compiled source text of
+    // getconfig_impl, so it still fails if the body-logging invariant
+    // regresses.
+    #[test]
+    fn acceptance_getconfig_impl_logs_esp_presence_without_logging_the_body() {
+        let src = include_str!("auth.rs");
+        let start = src
+            .find("async fn getconfig_impl(")
+            .expect("getconfig_impl not found in source - has it been renamed?");
+        let after = &src[start..];
+        let end = after
+            .find("\n/// Step 3:")
+            .expect("could not find the end boundary of getconfig_impl");
+        let body_fn = &after[..end];
+
+        assert!(
+            body_fn.contains("Gateway offered an ESP"),
+            "getconfig_impl must log when the gateway's response offers an ESP section"
+        );
+        assert!(
+            body_fn.contains("No ESP section"),
+            "getconfig_impl must log when the gateway's response does not offer an ESP section"
+        );
+
+        for (i, line) in body_fn.lines().enumerate() {
+            let trimmed = line.trim_start();
+            let is_log_call = trimmed.starts_with("debug!")
+                || trimmed.starts_with("info!")
+                || trimmed.starts_with("warn!")
+                || trimmed.starts_with("error!");
+            if is_log_call && line.contains("body") {
+                assert!(
+                    line.contains("body.len()") || line.contains("esp_offered"),
+                    "getconfig_impl line {i} appears to log the raw response body, \
+                     which carries session key material: {line}"
+                );
+            }
+        }
+    }
 }
