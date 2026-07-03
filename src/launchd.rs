@@ -185,15 +185,23 @@ pub fn is_daemon_installed() -> bool {
     Path::new(DAEMON_PLIST_PATH).exists()
 }
 
-/// Check whether installed daemon plist matches current executable and working dir.
+/// Check whether installed daemon plist matches current executable and home dir.
 pub fn is_daemon_plist_current(exe_path: &Path, home_dir: &Path) -> bool {
     let actual = match std::fs::read_to_string(DAEMON_PLIST_PATH) {
         Ok(v) => v,
         Err(_) => return false,
     };
 
+    plist_content_is_current(&actual, exe_path, home_dir)
+}
+
+/// Compare installed plist content against the expected content.
+///
+/// Trailing whitespace is ignored: installation writes the plist through
+/// a shell heredoc, which appends a newline the template does not have.
+pub fn plist_content_is_current(actual: &str, exe_path: &Path, home_dir: &Path) -> bool {
     let expected = generate_daemon_plist(exe_path, home_dir);
-    actual == expected
+    actual.trim_end() == expected.trim_end()
 }
 
 /// Trigger the daemon to start by touching the trigger file
@@ -262,6 +270,18 @@ mod tests {
         assert!(plist.contains("<key>EnvironmentVariables</key>"));
         assert!(plist.contains("<key>HOME</key>"));
         assert!(plist.contains("<string>/Users/tester</string>"));
+    }
+
+    #[test]
+    fn plist_comparison_tolerates_the_trailing_newline_added_by_installation() {
+        // install_and_start_daemon writes the plist through a shell heredoc,
+        // which appends a trailing newline; treating that as "stale" would
+        // re-prompt for admin credentials on every connect.
+        let exe_path = PathBuf::from("/usr/local/bin/pmacs-vpn");
+        let home_dir = PathBuf::from("/Users/tester");
+        let installed = format!("{}\n", generate_daemon_plist(&exe_path, &home_dir));
+
+        assert!(plist_content_is_current(&installed, &exe_path, &home_dir));
     }
 
     #[test]
