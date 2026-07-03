@@ -116,6 +116,26 @@ fn requires_admin(cmd: &Commands) -> bool {
     }
 }
 
+/// Open the daemon child's log file under `<home>/.pmacs-vpn/daemon.log`.
+///
+/// Returns None when that location cannot be created or written; the
+/// caller then logs to stderr, which launchd already redirects to
+/// /tmp/pmacs-vpn-daemon.log. The daemon must never abort over logging.
+fn open_daemon_log_file(home: &str) -> Option<(std::fs::File, std::path::PathBuf)> {
+    let log_path = std::path::PathBuf::from(home)
+        .join(".pmacs-vpn")
+        .join("daemon.log");
+
+    if let Some(parent) = log_path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+
+    // Truncate on start for clean logs
+    std::fs::File::create(&log_path)
+        .ok()
+        .map(|file| (file, log_path))
+}
+
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let cli = Cli::parse();
@@ -134,31 +154,40 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
 
     if is_daemon_child {
-        // Daemon mode: log to file since stdout/stderr are null
+        // Daemon mode: log to a file under the user's home when possible.
         let home = std::env::var("USERPROFILE")
             .or_else(|_| std::env::var("HOME"))
             .or_else(|_| std::env::var("LOCALAPPDATA"))
             .unwrap_or_else(|_| ".".to_string());
-        let log_path = std::path::PathBuf::from(home)
-            .join(".pmacs-vpn")
-            .join("daemon.log");
 
-        // Create parent directory if needed
-        if let Some(parent) = log_path.parent() {
-            let _ = std::fs::create_dir_all(parent);
+        match open_daemon_log_file(&home) {
+            Some((log_file, log_path)) => {
+                let subscriber = FmtSubscriber::builder()
+                    .with_max_level(level)
+                    .with_target(false)
+                    .with_ansi(false) // No color codes in log file
+                    .with_writer(Mutex::new(log_file))
+                    .finish();
+                tracing::subscriber::set_global_default(subscriber)?;
+                info!("Daemon child started, logging to {:?}", log_path);
+            }
+            None => {
+                // Fall back to stderr, which launchd redirects to
+                // /tmp/pmacs-vpn-daemon.log; a bad log path must not
+                // abort the daemon.
+                let subscriber = FmtSubscriber::builder()
+                    .with_max_level(level)
+                    .with_target(false)
+                    .with_ansi(false)
+                    .with_writer(std::io::stderr)
+                    .finish();
+                tracing::subscriber::set_global_default(subscriber)?;
+                warn!(
+                    "Daemon child started; could not create log file under {:?}, logging to stderr",
+                    home
+                );
+            }
         }
-
-        // Open log file (truncate on start for clean logs)
-        let log_file = std::fs::File::create(&log_path).expect("Failed to create daemon log file");
-
-        let subscriber = FmtSubscriber::builder()
-            .with_max_level(level)
-            .with_target(false)
-            .with_ansi(false) // No color codes in log file
-            .with_writer(Mutex::new(log_file))
-            .finish();
-        tracing::subscriber::set_global_default(subscriber)?;
-        info!("Daemon child started, logging to {:?}", log_path);
     } else {
         // Normal mode: log to stderr
         let subscriber = FmtSubscriber::builder()
@@ -1127,13 +1156,13 @@ fn spawn_daemon_via_macos_elevation(
 fn spawn_daemon_via_launchd(
     exe: &std::path::Path,
 ) -> Result<u32, Box<dyn std::error::Error + Send + Sync>> {
-    let cwd = std::env::current_dir()?;
+    let home = dirs::home_dir().ok_or("Cannot determine home directory for the daemon plist")?;
     let needs_install = !pmacs_vpn::launchd::is_daemon_installed()
-        || !pmacs_vpn::launchd::is_daemon_plist_current(exe, &cwd);
+        || !pmacs_vpn::launchd::is_daemon_plist_current(exe, &home);
 
     if needs_install {
         info!("Installing privileged launchd daemon (one-time setup/update)");
-        pmacs_vpn::launchd::install_and_start_daemon(exe, &cwd).map_err(std::io::Error::other)?;
+        pmacs_vpn::launchd::install_and_start_daemon(exe, &home).map_err(std::io::Error::other)?;
     }
 
     pmacs_vpn::launchd::trigger_daemon_start().map_err(std::io::Error::other)?;
@@ -2069,6 +2098,22 @@ async fn cleanup_vpn(state: &pmacs_vpn::VpnState) -> Result<(), Box<dyn std::err
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn daemon_log_file_opens_under_a_writable_home() {
+        let home = tempfile::tempdir().unwrap();
+        let opened = open_daemon_log_file(home.path().to_str().unwrap());
+        let (_file, path) = opened.expect("writable home must yield a log file");
+        assert!(path.ends_with(".pmacs-vpn/daemon.log"));
+    }
+
+    #[test]
+    fn daemon_log_file_yields_none_instead_of_panicking_when_home_is_unwritable() {
+        // The launchd daemon used to abort at startup when its resolved
+        // home was not writable (e.g. the sealed system volume root).
+        let opened = open_daemon_log_file("/pmacs-vpn-nonexistent-unwritable-home");
+        assert!(opened.is_none());
+    }
 
     fn connect_cmd(background: bool) -> Commands {
         Commands::Connect {

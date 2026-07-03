@@ -20,13 +20,16 @@ pub const TRIGGER_FILE: &str = "/tmp/pmacs-vpn-connect-trigger";
 ///
 /// # Arguments
 /// * `exe_path` - Path to the pmacs-vpn executable
-/// * `working_dir` - Directory containing pmacs-vpn.toml
+/// * `home_dir` - Home directory of the connecting user; becomes the
+///   daemon's working directory and its HOME environment variable
+///   (launchd system daemons otherwise run with no HOME, which breaks
+///   auth-token and config lookup)
 ///
 /// # Returns
 /// XML plist string suitable for LaunchDaemon
-pub fn generate_daemon_plist(exe_path: &Path, working_dir: &Path) -> String {
+pub fn generate_daemon_plist(exe_path: &Path, home_dir: &Path) -> String {
     let exe_path_str = exe_path.display();
-    let working_dir_str = working_dir.display();
+    let home_dir_str = home_dir.display();
 
     format!(
         r#"<?xml version="1.0" encoding="UTF-8"?>
@@ -34,20 +37,25 @@ pub fn generate_daemon_plist(exe_path: &Path, working_dir: &Path) -> String {
 <plist version="1.0">
 <dict>
     <key>Label</key>
-    <string>{}</string>
+    <string>{label}</string>
     <key>ProgramArguments</key>
     <array>
-        <string>{}</string>
+        <string>{exe}</string>
         <string>connect</string>
         <string>--daemon-pid=1</string>
     </array>
     <key>WorkingDirectory</key>
-    <string>{}</string>
+    <string>{home}</string>
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>HOME</key>
+        <string>{home}</string>
+    </dict>
     <key>RunAtLoad</key>
     <false/>
     <key>WatchPaths</key>
     <array>
-        <string>{}</string>
+        <string>{trigger}</string>
     </array>
     <key>KeepAlive</key>
     <false/>
@@ -57,7 +65,10 @@ pub fn generate_daemon_plist(exe_path: &Path, working_dir: &Path) -> String {
     <string>/tmp/pmacs-vpn-daemon.log</string>
 </dict>
 </plist>"#,
-        DAEMON_LABEL, exe_path_str, working_dir_str, TRIGGER_FILE
+        label = DAEMON_LABEL,
+        exe = exe_path_str,
+        home = home_dir_str,
+        trigger = TRIGGER_FILE
     )
 }
 
@@ -76,16 +87,16 @@ fn applescript_escape(s: &str) -> String {
 ///
 /// # Arguments
 /// * `exe_path` - Path to the pmacs-vpn executable
-/// * `working_dir` - Directory containing pmacs-vpn.toml
+/// * `home_dir` - Home directory of the connecting user
 ///
 /// # Returns
 /// Ok(()) on success, Err with message on failure
-pub fn install_and_start_daemon(exe_path: &Path, working_dir: &Path) -> Result<(), String> {
+pub fn install_and_start_daemon(exe_path: &Path, home_dir: &Path) -> Result<(), String> {
     info!("Installing LaunchDaemon: {}", DAEMON_LABEL);
     debug!("Executable: {}", exe_path.display());
-    debug!("Working directory: {}", working_dir.display());
+    debug!("Home directory: {}", home_dir.display());
 
-    let plist_content = generate_daemon_plist(exe_path, working_dir);
+    let plist_content = generate_daemon_plist(exe_path, home_dir);
 
     // Build the shell command that will run with admin privileges
     let shell_cmd = format!(
@@ -175,13 +186,13 @@ pub fn is_daemon_installed() -> bool {
 }
 
 /// Check whether installed daemon plist matches current executable and working dir.
-pub fn is_daemon_plist_current(exe_path: &Path, working_dir: &Path) -> bool {
+pub fn is_daemon_plist_current(exe_path: &Path, home_dir: &Path) -> bool {
     let actual = match std::fs::read_to_string(DAEMON_PLIST_PATH) {
         Ok(v) => v,
         Err(_) => return false,
     };
 
-    let expected = generate_daemon_plist(exe_path, working_dir);
+    let expected = generate_daemon_plist(exe_path, home_dir);
     actual == expected
 }
 
@@ -220,9 +231,9 @@ mod tests {
     #[test]
     fn test_generate_daemon_plist() {
         let exe_path = PathBuf::from("/usr/local/bin/pmacs-vpn");
-        let working_dir = PathBuf::from("/etc/pmacs-vpn");
+        let home_dir = PathBuf::from("/Users/tester");
 
-        let plist = generate_daemon_plist(&exe_path, &working_dir);
+        let plist = generate_daemon_plist(&exe_path, &home_dir);
 
         // Verify key elements are present
         assert!(plist.contains("<?xml version=\"1.0\" encoding=\"UTF-8\"?>"));
@@ -231,13 +242,38 @@ mod tests {
         assert!(plist.contains("/usr/local/bin/pmacs-vpn"));
         assert!(plist.contains("<string>connect</string>"));
         assert!(plist.contains("<string>--daemon-pid=1</string>"));
-        assert!(plist.contains("/etc/pmacs-vpn"));
         assert!(plist.contains("<key>RunAtLoad</key>"));
         assert!(plist.contains("<key>WatchPaths</key>"));
         assert!(plist.contains(TRIGGER_FILE));
         assert!(plist.contains("<key>KeepAlive</key>"));
         assert!(plist.contains("<false/>"));
         assert!(plist.contains("/tmp/pmacs-vpn-daemon.log"));
+    }
+
+    #[test]
+    fn daemon_plist_carries_home_into_the_daemon_environment() {
+        // launchd starts system daemons with no HOME; the daemon needs it
+        // to locate the auth token and state directory.
+        let exe_path = PathBuf::from("/usr/local/bin/pmacs-vpn");
+        let home_dir = PathBuf::from("/Users/tester");
+
+        let plist = generate_daemon_plist(&exe_path, &home_dir);
+
+        assert!(plist.contains("<key>EnvironmentVariables</key>"));
+        assert!(plist.contains("<key>HOME</key>"));
+        assert!(plist.contains("<string>/Users/tester</string>"));
+    }
+
+    #[test]
+    fn daemon_plist_working_directory_is_the_home_dir_not_the_invocation_cwd() {
+        // A cwd-dependent plist forces an admin reinstall dialog whenever
+        // connect runs from a different directory, which breaks headless use.
+        let exe_path = PathBuf::from("/usr/local/bin/pmacs-vpn");
+        let home_dir = PathBuf::from("/Users/tester");
+
+        let plist = generate_daemon_plist(&exe_path, &home_dir);
+
+        assert!(plist.contains("<key>WorkingDirectory</key>\n    <string>/Users/tester</string>"));
     }
 
     #[test]
