@@ -73,7 +73,23 @@ pub fn show_notification_with_sound(title: &str, message: &str) {
 
 /// Notify that DUO push was sent
 pub fn notify_duo_push() {
-    show_notification("PMACS VPN", "Check your phone for DUO push");
+    if let Err(e) = spawn_background_notification("pmacs-vpn-duo-notification", || {
+        show_notification("PMACS VPN", "Check your phone for DUO push");
+    }) {
+        tracing::warn!("Failed to start DUO push notification worker: {}", e);
+    }
+}
+
+fn spawn_background_notification<F>(
+    name: &str,
+    notify: F,
+) -> std::io::Result<std::thread::JoinHandle<()>>
+where
+    F: FnOnce() + Send + 'static,
+{
+    std::thread::Builder::new()
+        .name(name.to_string())
+        .spawn(notify)
 }
 
 /// Notify successful connection
@@ -111,4 +127,43 @@ pub fn notify_reconnect_failed() {
 /// Notify unexpected disconnection
 pub fn notify_unexpected_disconnect() {
     show_notification("PMACS VPN", "VPN disconnected unexpectedly");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::mpsc;
+    use std::time::{Duration, Instant};
+
+    #[test]
+    fn background_notification_spawn_does_not_wait_for_delivery() {
+        let (started_tx, started_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel();
+
+        let start = Instant::now();
+        let handle = spawn_background_notification("pmacs-vpn-test-notification", move || {
+            started_tx
+                .send(())
+                .expect("test should observe worker start");
+            release_rx
+                .recv()
+                .expect("test should release blocked notification worker");
+        })
+        .expect("notification worker should spawn");
+
+        assert!(
+            start.elapsed() < Duration::from_millis(100),
+            "spawning a notification worker must not wait for delivery"
+        );
+        started_rx
+            .recv_timeout(Duration::from_secs(1))
+            .expect("notification worker should start");
+
+        release_tx
+            .send(())
+            .expect("test should release notification worker");
+        handle
+            .join()
+            .expect("notification worker should exit cleanly");
+    }
 }
