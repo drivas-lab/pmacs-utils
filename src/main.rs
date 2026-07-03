@@ -95,6 +95,15 @@ fn is_admin() -> bool {
 /// Commands that require admin privileges
 fn requires_admin(cmd: &Commands) -> bool {
     match cmd {
+        // On macOS, background connect delegates the privileged work (TUN
+        // device, routes, /etc/hosts) to the installed LaunchDaemon; the
+        // parent only authenticates and touches the trigger file, exactly
+        // like the tray. Demanding sudo here blocks headless use.
+        #[cfg(target_os = "macos")]
+        Commands::Connect {
+            background: true, ..
+        } => false,
+
         // Connect/Disconnect require root on all platforms (TUN device, routes, /etc/hosts)
         Commands::Connect { .. } | Commands::Disconnect => true,
 
@@ -2060,6 +2069,37 @@ async fn cleanup_vpn(state: &pmacs_vpn::VpnState) -> Result<(), Box<dyn std::err
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn connect_cmd(background: bool) -> Commands {
+        Commands::Connect {
+            user: None,
+            save_password: false,
+            forget_password: false,
+            keep_alive: false,
+            background,
+            _daemon_pid: None,
+        }
+    }
+
+    #[test]
+    fn foreground_connect_requires_admin() {
+        assert!(requires_admin(&connect_cmd(false)));
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn background_connect_on_macos_does_not_require_admin() {
+        // The privileged work (TUN device, routes) runs in the installed
+        // LaunchDaemon; the parent only authenticates and touches the
+        // trigger file, so demanding sudo here blocks headless use.
+        assert!(!requires_admin(&connect_cmd(true)));
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    #[test]
+    fn background_connect_still_requires_admin_off_macos() {
+        assert!(requires_admin(&connect_cmd(true)));
+    }
 
     #[test]
     fn save_flag_forces_save_in_both_modes() {
