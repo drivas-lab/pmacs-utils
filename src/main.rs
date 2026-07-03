@@ -871,6 +871,9 @@ enum MonitorAction {
     Stand,
     /// A live daemon exists that the tray is not tracking — reflect it.
     AdoptConnected(String),
+    /// A daemon that the tray only observed is gone — reflect disconnection
+    /// without starting a fresh authentication flow.
+    MarkDisconnected,
     /// The daemon the tray was tracking is gone — start recovery.
     BeginRecovery,
 }
@@ -883,6 +886,7 @@ enum MonitorAction {
 fn monitor_action(phase: &ConnectionPhase, live_gateway: Option<String>) -> MonitorAction {
     match (phase, live_gateway) {
         (ConnectionPhase::Idle, Some(gateway)) => MonitorAction::AdoptConnected(gateway),
+        (ConnectionPhase::ObservedConnected, None) => MonitorAction::MarkDisconnected,
         (ConnectionPhase::Connected, None) => MonitorAction::BeginRecovery,
         _ => MonitorAction::Stand,
     }
@@ -965,11 +969,20 @@ fn spawn_tray_health_monitor(
                 MonitorAction::AdoptConnected(ip) => {
                     if let Some(ip) = adoption.observe(ip) {
                         // CAS so a user action starting between probe and now wins.
-                        if phase.transition(&ConnectionPhase::Idle, ConnectionPhase::Connected) {
+                        if phase.transition(
+                            &ConnectionPhase::Idle,
+                            ConnectionPhase::ObservedConnected,
+                        ) {
                             info!("Adopted externally-established VPN session (gateway {})", ip);
                             let _ = status_tx.send(VpnStatus::Connected { ip });
                         }
                     }
+                    continue;
+                }
+                MonitorAction::MarkDisconnected => {
+                    adoption.reset();
+                    phase.set(ConnectionPhase::Idle);
+                    let _ = status_tx.send(VpnStatus::Disconnected);
                     continue;
                 }
                 MonitorAction::BeginRecovery => {
@@ -993,7 +1006,7 @@ fn spawn_tray_health_monitor(
                         config.preferences.reconnect_delay_secs,
                     )
                 } else {
-                    (true, 3, 5)
+                    (false, 3, 5)
                 };
 
             if !auto_reconnect_enabled {
@@ -1054,6 +1067,12 @@ fn spawn_tray_health_monitor(
                     let current = phase.get();
                     match current {
                         ConnectionPhase::Connected => {
+                            resolved = true;
+                            break;
+                        }
+                        ConnectionPhase::ObservedConnected => {
+                            // Another live daemon appeared while recovering.
+                            // Stop driving this auto-reconnect attempt.
                             resolved = true;
                             break;
                         }
@@ -2349,7 +2368,8 @@ mod tests {
     fn acceptance_idle_session_established_outside_tray_is_adopted_after_two_matching_sightings() {
         // A session started by the CLI, or by a daemon with no IPC server
         // but a valid state file and a live PID, must still turn the tray
-        // green. Drive PhaseTracker, monitor_action, and AdoptionDebounce
+        // green without making the tray responsible for reauthenticating
+        // it. Drive PhaseTracker, monitor_action, and AdoptionDebounce
         // together the way spawn_tray_health_monitor's loop body does,
         // substituting a synthetic probe result for a real IpcClient.
         let phase = PhaseTracker::new();
@@ -2378,14 +2398,30 @@ mod tests {
                     .observe(ip)
                     .expect("second consecutive sighting of the same gateway must confirm");
                 assert_eq!(confirmed, gateway);
-                assert!(phase.transition(&ConnectionPhase::Idle, ConnectionPhase::Connected));
+                assert!(
+                    phase.transition(&ConnectionPhase::Idle, ConnectionPhase::ObservedConnected)
+                );
             }
             other => panic!(
                 "expected AdoptConnected on the second sighting, got {:?}",
                 other
             ),
         }
-        assert_eq!(phase.get(), ConnectionPhase::Connected);
+        assert_eq!(phase.get(), ConnectionPhase::ObservedConnected);
+    }
+
+    #[test]
+    fn acceptance_observed_session_disappearing_does_not_begin_recovery() {
+        // BREAKS IF: a daemon merely observed by the tray is treated as a
+        // tray-managed session, causing a background DUO-triggering
+        // reconnect when the observed daemon exits or its IPC disappears.
+        let phase = PhaseTracker::new();
+        phase.set(ConnectionPhase::ObservedConnected);
+
+        assert_eq!(
+            monitor_action(&phase.get(), None),
+            MonitorAction::MarkDisconnected
+        );
     }
 
     #[test]

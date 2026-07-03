@@ -15,6 +15,9 @@ pub enum ConnectionPhase {
     Connecting,
     /// Connected and healthy.
     Connected,
+    /// A live daemon exists, but this tray did not start it and should not
+    /// automatically reauthenticate it.
+    ObservedConnected,
     /// User-initiated disconnect in progress.
     Disconnecting,
     /// Auto-reconnect in progress after unexpected disconnect.
