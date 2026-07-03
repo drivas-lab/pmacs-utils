@@ -50,6 +50,9 @@ pub enum TrayCommand {
 pub enum VpnStatus {
     Disconnected,
     Connecting,
+    Authenticating,
+    WaitingForDuo { method: String },
+    StartingDaemon,
     Connected { ip: String },
     Disconnecting,
     Reconnecting { attempt: u32, max_attempts: u32 },
@@ -350,51 +353,11 @@ impl TrayApp {
                         notifications::notify_error(msg);
                     }
 
-                    // Update menu items based on status
-                    match &status {
-                        VpnStatus::Disconnected => {
-                            status_item.set_text("Status: Disconnected");
-                            connect_item.set_enabled(true);
-                            disconnect_item.set_enabled(false);
-                            reconnect_item.set_enabled(false);
-                        }
-                        VpnStatus::Connecting => {
-                            status_item.set_text("Status: Connecting...");
-                            connect_item.set_enabled(false);
-                            disconnect_item.set_enabled(false);
-                            reconnect_item.set_enabled(false);
-                        }
-                        VpnStatus::Connected { ip } => {
-                            status_item.set_text(format!("Status: Connected ({})", ip));
-                            connect_item.set_enabled(false);
-                            disconnect_item.set_enabled(true);
-                            reconnect_item.set_enabled(true);
-                        }
-                        VpnStatus::Disconnecting => {
-                            status_item.set_text("Status: Disconnecting...");
-                            connect_item.set_enabled(false);
-                            disconnect_item.set_enabled(false);
-                            reconnect_item.set_enabled(false);
-                        }
-                        VpnStatus::Reconnecting {
-                            attempt,
-                            max_attempts,
-                        } => {
-                            status_item.set_text(format!(
-                                "Status: Reconnecting ({}/{})",
-                                attempt, max_attempts
-                            ));
-                            connect_item.set_enabled(false);
-                            disconnect_item.set_enabled(true);
-                            reconnect_item.set_enabled(false);
-                        }
-                        VpnStatus::Error(_) => {
-                            status_item.set_text("Status: Error");
-                            connect_item.set_enabled(true);
-                            disconnect_item.set_enabled(false);
-                            reconnect_item.set_enabled(true);
-                        }
-                    }
+                    let presentation = tray_status_presentation(&status);
+                    status_item.set_text(presentation.status_text);
+                    connect_item.set_enabled(presentation.connect_enabled);
+                    disconnect_item.set_enabled(presentation.disconnect_enabled);
+                    reconnect_item.set_enabled(presentation.reconnect_enabled);
 
                     current_status = status.clone();
                     if let Some(ref tray) = tray_icon {
@@ -477,38 +440,119 @@ fn create_solid_icon(r: u8, g: u8, b: u8, a: u8) -> tray_icon::Icon {
 
 /// Update tray icon and tooltip based on VPN status
 fn update_tray_for_status(tray: &TrayIcon, status: &VpnStatus) {
-    let (icon, tooltip): (tray_icon::Icon, String) = match status {
-        VpnStatus::Disconnected => (
-            create_disconnected_icon(),
-            "PMACS VPN - Disconnected".to_string(),
-        ),
-        VpnStatus::Connecting => (
-            create_connecting_icon(),
-            "PMACS VPN - Connecting...".to_string(),
-        ),
-        VpnStatus::Connected { ip } => (
-            create_connected_icon(),
-            format!("PMACS VPN - Connected ({})", ip),
-        ),
-        VpnStatus::Disconnecting => (
-            create_connecting_icon(),
-            "PMACS VPN - Disconnecting...".to_string(),
-        ),
-        VpnStatus::Reconnecting {
-            attempt,
-            max_attempts,
-        } => (
-            create_connecting_icon(),
-            format!("PMACS VPN - Reconnecting ({}/{})", attempt, max_attempts),
-        ),
-        VpnStatus::Error(msg) => (create_error_icon(), format!("PMACS VPN - Error: {}", msg)),
+    let icon = match status {
+        VpnStatus::Disconnected => create_disconnected_icon(),
+        VpnStatus::Connecting
+        | VpnStatus::Authenticating
+        | VpnStatus::WaitingForDuo { .. }
+        | VpnStatus::StartingDaemon
+        | VpnStatus::Disconnecting
+        | VpnStatus::Reconnecting { .. } => create_connecting_icon(),
+        VpnStatus::Connected { .. } => create_connected_icon(),
+        VpnStatus::Error(_) => create_error_icon(),
     };
+    let tooltip = tray_status_presentation(status).tooltip;
 
     if let Err(e) = tray.set_icon(Some(icon)) {
         error!("Failed to set tray icon: {}", e);
     }
     if let Err(e) = tray.set_tooltip(Some(tooltip)) {
         error!("Failed to set tooltip: {}", e);
+    }
+}
+
+#[derive(Debug, PartialEq)]
+struct TrayStatusPresentation {
+    status_text: String,
+    tooltip: String,
+    connect_enabled: bool,
+    disconnect_enabled: bool,
+    reconnect_enabled: bool,
+}
+
+fn duo_wait_label(method: &str) -> String {
+    let method = method.trim();
+    if method.is_empty() {
+        return "DUO approval".to_string();
+    }
+    if method.to_ascii_lowercase().starts_with("duo ") {
+        method.to_string()
+    } else {
+        format!("DUO {}", method)
+    }
+}
+
+fn tray_status_presentation(status: &VpnStatus) -> TrayStatusPresentation {
+    match status {
+        VpnStatus::Disconnected => TrayStatusPresentation {
+            status_text: "Status: Disconnected".to_string(),
+            tooltip: "PMACS VPN - Disconnected".to_string(),
+            connect_enabled: true,
+            disconnect_enabled: false,
+            reconnect_enabled: false,
+        },
+        VpnStatus::Connecting => TrayStatusPresentation {
+            status_text: "Status: Connecting...".to_string(),
+            tooltip: "PMACS VPN - Connecting...".to_string(),
+            connect_enabled: false,
+            disconnect_enabled: false,
+            reconnect_enabled: false,
+        },
+        VpnStatus::Authenticating => TrayStatusPresentation {
+            status_text: "Status: Authenticating with PMACS...".to_string(),
+            tooltip: "PMACS VPN - Authenticating with PMACS".to_string(),
+            connect_enabled: false,
+            disconnect_enabled: false,
+            reconnect_enabled: false,
+        },
+        VpnStatus::WaitingForDuo { method } => {
+            let label = duo_wait_label(method);
+            TrayStatusPresentation {
+                status_text: format!("Status: Waiting for {}...", label),
+                tooltip: format!("PMACS VPN - Waiting for {}", label),
+                connect_enabled: false,
+                disconnect_enabled: false,
+                reconnect_enabled: false,
+            }
+        }
+        VpnStatus::StartingDaemon => TrayStatusPresentation {
+            status_text: "Status: Starting VPN daemon...".to_string(),
+            tooltip: "PMACS VPN - Starting VPN daemon".to_string(),
+            connect_enabled: false,
+            disconnect_enabled: false,
+            reconnect_enabled: false,
+        },
+        VpnStatus::Connected { ip } => TrayStatusPresentation {
+            status_text: format!("Status: Connected ({})", ip),
+            tooltip: format!("PMACS VPN - Connected ({})", ip),
+            connect_enabled: false,
+            disconnect_enabled: true,
+            reconnect_enabled: true,
+        },
+        VpnStatus::Disconnecting => TrayStatusPresentation {
+            status_text: "Status: Disconnecting...".to_string(),
+            tooltip: "PMACS VPN - Disconnecting...".to_string(),
+            connect_enabled: false,
+            disconnect_enabled: false,
+            reconnect_enabled: false,
+        },
+        VpnStatus::Reconnecting {
+            attempt,
+            max_attempts,
+        } => TrayStatusPresentation {
+            status_text: format!("Status: Reconnecting ({}/{})", attempt, max_attempts),
+            tooltip: format!("PMACS VPN - Reconnecting ({}/{})", attempt, max_attempts),
+            connect_enabled: false,
+            disconnect_enabled: true,
+            reconnect_enabled: false,
+        },
+        VpnStatus::Error(msg) => TrayStatusPresentation {
+            status_text: "Status: Error".to_string(),
+            tooltip: format!("PMACS VPN - Error: {}", msg),
+            connect_enabled: true,
+            disconnect_enabled: false,
+            reconnect_enabled: true,
+        },
     }
 }
 
@@ -532,6 +576,38 @@ mod tests {
             ip: "10.0.0.1".to_string(),
         };
         assert_eq!(s1, s2);
+    }
+
+    #[test]
+    fn pre_daemon_auth_statuses_explain_why_duo_has_not_arrived_yet() {
+        let authenticating = tray_status_presentation(&VpnStatus::Authenticating);
+        assert_eq!(
+            authenticating.status_text,
+            "Status: Authenticating with PMACS..."
+        );
+        assert_eq!(
+            authenticating.tooltip,
+            "PMACS VPN - Authenticating with PMACS"
+        );
+        assert!(!authenticating.connect_enabled);
+        assert!(!authenticating.disconnect_enabled);
+        assert!(!authenticating.reconnect_enabled);
+
+        let waiting_for_duo = tray_status_presentation(&VpnStatus::WaitingForDuo {
+            method: "push".to_string(),
+        });
+        assert_eq!(
+            waiting_for_duo.status_text,
+            "Status: Waiting for DUO push..."
+        );
+        assert_eq!(waiting_for_duo.tooltip, "PMACS VPN - Waiting for DUO push");
+
+        let starting_daemon = tray_status_presentation(&VpnStatus::StartingDaemon);
+        assert_eq!(
+            starting_daemon.status_text,
+            "Status: Starting VPN daemon..."
+        );
+        assert_eq!(starting_daemon.tooltip, "PMACS VPN - Starting VPN daemon");
     }
 
     #[test]

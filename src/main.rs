@@ -5,7 +5,9 @@ use pmacs_vpn::gp;
 use pmacs_vpn::notifications;
 use pmacs_vpn::vpn::hosts::HostsManager;
 use pmacs_vpn::vpn::routing::VpnRouter;
+use std::future::Future;
 use std::sync::Mutex;
+use std::time::Duration;
 #[cfg(unix)]
 use tokio::signal::unix::{SignalKind, signal};
 #[cfg(target_os = "macos")]
@@ -237,6 +239,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     forget_password,
                     keep_alive,
                     PromptMode::Console,
+                    None,
                 )
                 .await
                 {
@@ -506,6 +509,56 @@ enum PromptMode {
     Dialog,
 }
 
+const AUTH_PRELOGIN_TIMEOUT: Duration = Duration::from_secs(45);
+const AUTH_LOGIN_TIMEOUT: Duration = Duration::from_secs(180);
+
+#[derive(Copy, Clone, Debug, PartialEq)]
+enum AuthStep {
+    Prelogin,
+    Login,
+}
+
+impl AuthStep {
+    fn timeout_message(self) -> &'static str {
+        match self {
+            AuthStep::Prelogin => "Timed out contacting PMACS before DUO push was requested",
+            AuthStep::Login => "Timed out waiting for PMACS/DUO authentication to finish",
+        }
+    }
+}
+
+#[derive(Debug)]
+enum AuthStepError<E> {
+    Inner(E),
+    TimedOut(AuthStep),
+}
+
+impl<E: std::fmt::Display> std::fmt::Display for AuthStepError<E> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            AuthStepError::Inner(e) => write!(f, "{}", e),
+            AuthStepError::TimedOut(step) => write!(f, "{}", step.timeout_message()),
+        }
+    }
+}
+
+impl<E> std::error::Error for AuthStepError<E> where E: std::fmt::Debug + std::fmt::Display {}
+
+async fn auth_step_with_timeout<T, E, F>(
+    step: AuthStep,
+    timeout: Duration,
+    future: F,
+) -> Result<T, AuthStepError<E>>
+where
+    F: Future<Output = Result<T, E>>,
+{
+    match tokio::time::timeout(timeout, future).await {
+        Ok(Ok(value)) => Ok(value),
+        Ok(Err(e)) => Err(AuthStepError::Inner(e)),
+        Err(_) => Err(AuthStepError::TimedOut(step)),
+    }
+}
+
 /// What to do with a password after a successful login.
 #[derive(Debug, PartialEq)]
 enum SaveDecision {
@@ -611,11 +664,21 @@ fn best_effort_admin_cleanup(rt: &tokio::runtime::Handle) -> Result<(), String> 
     rt.block_on(disconnect_vpn()).map_err(|e| e.to_string())
 }
 
-fn tray_connect(rt: &tokio::runtime::Handle) -> Result<String, String> {
+fn tray_connect(
+    rt: &tokio::runtime::Handle,
+    status_tx: &std::sync::mpsc::Sender<pmacs_vpn::tray::VpnStatus>,
+) -> Result<String, String> {
     ensure_tray_config()?;
 
     let pid = rt
-        .block_on(spawn_daemon(&None, false, false, true, PromptMode::Dialog))
+        .block_on(spawn_daemon(
+            &None,
+            false,
+            false,
+            true,
+            PromptMode::Dialog,
+            Some(status_tx.clone()),
+        ))
         .map_err(|e| e.to_string())?;
     if pid > 0 {
         info!("Tray: VPN daemon started (PID {})", pid);
@@ -713,7 +776,7 @@ fn spawn_tray_command_handler(
                     }
                     let _ = status_tx.send(VpnStatus::Connecting);
 
-                    match tray_connect(&rt) {
+                    match tray_connect(&rt, &status_tx) {
                         Ok(ip) => {
                             notifications::notify_connected();
                             phase.set(ConnectionPhase::Connected);
@@ -783,7 +846,7 @@ fn spawn_tray_command_handler(
                     phase.set(ConnectionPhase::Connecting);
                     let _ = status_tx.send(VpnStatus::Connecting);
 
-                    match tray_connect(&rt) {
+                    match tray_connect(&rt, &status_tx) {
                         Ok(ip) => {
                             notifications::notify_connected();
                             phase.set(ConnectionPhase::Connected);
@@ -817,7 +880,7 @@ fn spawn_tray_command_handler(
 
                     phase.set(ConnectionPhase::Connecting);
 
-                    match tray_connect(&rt) {
+                    match tray_connect(&rt, &status_tx) {
                         Ok(ip) => {
                             notifications::notify_connected();
                             phase.set(ConnectionPhase::Connected);
@@ -1312,6 +1375,15 @@ fn launchd_trigger_socket_owner() -> Option<(u32, u32)> {
     Some(owner)
 }
 
+fn send_connect_status(
+    progress_tx: &Option<std::sync::mpsc::Sender<pmacs_vpn::tray::VpnStatus>>,
+    status: pmacs_vpn::tray::VpnStatus,
+) {
+    if let Some(tx) = progress_tx {
+        let _ = tx.send(status);
+    }
+}
+
 /// Spawn VPN as a detached background process (daemon mode)
 /// Does authentication FIRST in parent, then passes token to child
 async fn spawn_daemon(
@@ -1320,6 +1392,7 @@ async fn spawn_daemon(
     forget_password: bool,
     keep_alive: bool,
     prompt_mode: PromptMode,
+    progress_tx: Option<std::sync::mpsc::Sender<pmacs_vpn::tray::VpnStatus>>,
 ) -> Result<u32, Box<dyn std::error::Error + Send + Sync>> {
     use std::process::Command;
 
@@ -1393,7 +1466,13 @@ async fn spawn_daemon(
 
     // 5. Do auth flow
     println!("Authenticating...");
-    let prelogin = gp::auth::prelogin(&config.vpn.gateway).await?;
+    send_connect_status(&progress_tx, pmacs_vpn::tray::VpnStatus::Authenticating);
+    let prelogin = auth_step_with_timeout(
+        AuthStep::Prelogin,
+        AUTH_PRELOGIN_TIMEOUT,
+        gp::auth::prelogin(&config.vpn.gateway),
+    )
+    .await?;
     info!("Auth method: {:?}", prelogin.auth_method);
 
     // Get DUO method from config
@@ -1414,14 +1493,26 @@ async fn spawn_daemon(
         };
 
         println!("Logging in ({})...", duo_method.description());
+        send_connect_status(
+            &progress_tx,
+            pmacs_vpn::tray::VpnStatus::WaitingForDuo {
+                method: duo_method.description().to_string(),
+            },
+        );
         if *duo_method == pmacs_vpn::DuoMethod::Push {
             notifications::notify_duo_push();
         }
         let duo_str = duo_passcode.as_deref().or_else(|| duo_method.as_auth_str());
 
-        match gp::auth::login(&config.vpn.gateway, &username, &password, duo_str).await {
+        match auth_step_with_timeout(
+            AuthStep::Login,
+            AUTH_LOGIN_TIMEOUT,
+            gp::auth::login(&config.vpn.gateway, &username, &password, duo_str),
+        )
+        .await
+        {
             Ok(login) => break login,
-            Err(gp::AuthError::AuthFailed(msg)) => {
+            Err(AuthStepError::Inner(gp::AuthError::AuthFailed(msg))) => {
                 eprintln!("Login failed: {}", msg);
                 if was_cached {
                     eprintln!("(Saved password may be stale)");
@@ -1482,6 +1573,7 @@ async fn spawn_daemon(
 
     // 8. Spawn daemon child (it will read the token file)
     let exe = std::env::current_exe()?;
+    send_connect_status(&progress_tx, pmacs_vpn::tray::VpnStatus::StartingDaemon);
 
     #[cfg(target_os = "macos")]
     if !is_admin() {
@@ -2372,6 +2464,22 @@ mod tests {
         assert_eq!(
             resolve_save_decision(PromptMode::Console, false, false),
             SaveDecision::AskConsole
+        );
+    }
+
+    #[tokio::test]
+    async fn prelogin_timeout_error_explains_duo_has_not_started() {
+        let err = auth_step_with_timeout(
+            AuthStep::Prelogin,
+            std::time::Duration::from_millis(1),
+            std::future::pending::<Result<(), std::io::Error>>(),
+        )
+        .await
+        .expect_err("pending prelogin should time out");
+
+        assert_eq!(
+            err.to_string(),
+            "Timed out contacting PMACS before DUO push was requested"
         );
     }
 
