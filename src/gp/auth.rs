@@ -546,6 +546,14 @@ fn parse_dns_servers(policy: &PolicyXml) -> Vec<IpAddr> {
         .unwrap_or_default()
 }
 
+/// Whether the getconfig response contains an `<esp>` section, i.e. the
+/// gateway offered a UDP data path. The client currently runs SSL/TCP only;
+/// this is logged so gateway support for ESP can be read from normal logs
+/// without dumping the response body (it carries session keys).
+fn esp_offered(body: &str) -> bool {
+    body.contains("<esp>") || body.contains("<esp ")
+}
+
 /// Shared implementation for getting tunnel configuration
 async fn getconfig_impl(
     gateway: &str,
@@ -596,6 +604,14 @@ async fn getconfig_impl(
 
     let body = response.text().await?;
     debug!("Getconfig response received ({} bytes)", body.len());
+
+    if esp_offered(&body) {
+        info!(
+            "Gateway offered an ESP (UDP) section in getconfig; client currently uses SSL/TCP only"
+        );
+    } else {
+        info!("No ESP section in getconfig response; SSL/TCP is the only data path offered");
+    }
 
     let policy: PolicyXml = quick_xml::de::from_str(&body)
         .map_err(|e| AuthError::AuthFailed(format!("Invalid getconfig response: {}", e)))?;
@@ -840,5 +856,21 @@ mod tests {
             }
             other => panic!("expected AuthFailed with real message, got {:?}", other),
         }
+    }
+
+    #[test]
+    fn test_esp_offered_detection() {
+        let with_esp = r#"<response><ip-address>10.0.0.5</ip-address><esp><port>4501</port><enc-algo>aes-128-gcm</enc-algo></esp></response>"#;
+        let with_esp_attr = r#"<response><esp version="2"><port>4501</port></esp></response>"#;
+        let without_esp =
+            r#"<response><ip-address>10.0.0.5</ip-address><mtu>1400</mtu></response>"#;
+
+        assert!(esp_offered(with_esp));
+        assert!(esp_offered(with_esp_attr));
+        assert!(!esp_offered(without_esp));
+        // A tag that merely starts with "esp" must not count.
+        assert!(!esp_offered(
+            r#"<response><esp-disabled>yes</esp-disabled></response>"#
+        ));
     }
 }
