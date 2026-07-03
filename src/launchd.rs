@@ -3,7 +3,8 @@
 //! This module handles installing/uninstalling a privileged daemon via launchd.
 //! The daemon runs as root and starts the VPN connection automatically.
 
-use std::path::Path;
+use std::io::Read;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 use tracing::{debug, info};
 
@@ -185,7 +186,7 @@ pub fn is_daemon_installed() -> bool {
     Path::new(DAEMON_PLIST_PATH).exists()
 }
 
-/// Check whether installed daemon plist matches current executable and home dir.
+/// Check whether installed daemon plist matches the current launchd contract.
 pub fn is_daemon_plist_current(exe_path: &Path, home_dir: &Path) -> bool {
     let actual = match std::fs::read_to_string(DAEMON_PLIST_PATH) {
         Ok(v) => v,
@@ -201,7 +202,82 @@ pub fn is_daemon_plist_current(exe_path: &Path, home_dir: &Path) -> bool {
 /// a shell heredoc, which appends a newline the template does not have.
 pub fn plist_content_is_current(actual: &str, exe_path: &Path, home_dir: &Path) -> bool {
     let expected = generate_daemon_plist(exe_path, home_dir);
-    actual.trim_end() == expected.trim_end()
+    let actual = actual.trim_end();
+    if actual == expected.trim_end() {
+        return true;
+    }
+
+    let Some(registered_exe) = daemon_executable_from_plist(actual) else {
+        return false;
+    };
+    let expected_for_registered_exe = generate_daemon_plist(&registered_exe, home_dir);
+
+    actual == expected_for_registered_exe.trim_end()
+        && files_have_same_contents(&registered_exe, exe_path)
+}
+
+fn daemon_executable_from_plist(plist: &str) -> Option<PathBuf> {
+    let args = array_values_for_key(plist, "ProgramArguments")?;
+    match args.as_slice() {
+        [exe, connect, daemon_pid] if connect == "connect" && daemon_pid == "--daemon-pid=1" => {
+            Some(PathBuf::from(exe))
+        }
+        _ => None,
+    }
+}
+
+fn array_values_for_key(plist: &str, key: &str) -> Option<Vec<String>> {
+    let key_marker = format!("<key>{key}</key>");
+    let after_key = &plist[plist.find(&key_marker)? + key_marker.len()..];
+    let array_start = after_key.find("<array>")? + "<array>".len();
+    let array_end = after_key[array_start..].find("</array>")? + array_start;
+    let mut body = &after_key[array_start..array_end];
+    let mut values = Vec::new();
+
+    while let Some(start) = body.find("<string>") {
+        body = &body[start + "<string>".len()..];
+        let end = body.find("</string>")?;
+        values.push(body[..end].to_string());
+        body = &body[end + "</string>".len()..];
+    }
+
+    Some(values)
+}
+
+fn files_have_same_contents(a: &Path, b: &Path) -> bool {
+    if a == b {
+        return true;
+    }
+    if let (Ok(a_canon), Ok(b_canon)) = (std::fs::canonicalize(a), std::fs::canonicalize(b))
+        && a_canon == b_canon
+    {
+        return true;
+    }
+
+    let (Ok(a_meta), Ok(b_meta)) = (std::fs::metadata(a), std::fs::metadata(b)) else {
+        return false;
+    };
+    if a_meta.len() != b_meta.len() {
+        return false;
+    }
+
+    let (Ok(mut a_file), Ok(mut b_file)) = (std::fs::File::open(a), std::fs::File::open(b)) else {
+        return false;
+    };
+    let mut a_buf = [0_u8; 8192];
+    let mut b_buf = [0_u8; 8192];
+
+    loop {
+        let (Ok(a_read), Ok(b_read)) = (a_file.read(&mut a_buf), b_file.read(&mut b_buf)) else {
+            return false;
+        };
+        if a_read != b_read || a_buf[..a_read] != b_buf[..b_read] {
+            return false;
+        }
+        if a_read == 0 {
+            return true;
+        }
+    }
 }
 
 /// Trigger the daemon to start by touching the trigger file
@@ -282,6 +358,55 @@ mod tests {
         let installed = format!("{}\n", generate_daemon_plist(&exe_path, &home_dir));
 
         assert!(plist_content_is_current(&installed, &exe_path, &home_dir));
+    }
+
+    #[test]
+    fn plist_comparison_accepts_identical_registered_executable_at_different_path() {
+        // The tray app bundle and CLI can be different paths to the same
+        // build. Treating that as stale forces a needless admin reinstall
+        // prompt after auth instead of simply triggering the existing daemon.
+        let temp = tempfile::tempdir().expect("tempdir");
+        let cli_exe = temp.path().join("pmacs-vpn");
+        let app_exe = temp.path().join("PMACS VPN.app/Contents/MacOS/pmacs-vpn");
+        std::fs::create_dir_all(app_exe.parent().expect("app exe parent")).expect("mkdir app");
+        std::fs::write(&cli_exe, b"same pmacs vpn build").expect("write cli");
+        std::fs::write(&app_exe, b"same pmacs vpn build").expect("write app");
+
+        let home_dir = PathBuf::from("/Users/tester");
+        let installed = generate_daemon_plist(&app_exe, &home_dir);
+
+        assert!(plist_content_is_current(&installed, &cli_exe, &home_dir));
+    }
+
+    #[test]
+    fn plist_comparison_rejects_different_registered_executable_at_different_path() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let cli_exe = temp.path().join("pmacs-vpn");
+        let app_exe = temp.path().join("PMACS VPN.app/Contents/MacOS/pmacs-vpn");
+        std::fs::create_dir_all(app_exe.parent().expect("app exe parent")).expect("mkdir app");
+        std::fs::write(&cli_exe, b"new pmacs vpn build").expect("write cli");
+        std::fs::write(&app_exe, b"old pmacs vpn build").expect("write app");
+
+        let home_dir = PathBuf::from("/Users/tester");
+        let installed = generate_daemon_plist(&app_exe, &home_dir);
+
+        assert!(!plist_content_is_current(&installed, &cli_exe, &home_dir));
+    }
+
+    #[test]
+    fn plist_comparison_rejects_contract_drift_with_identical_registered_executable() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let cli_exe = temp.path().join("pmacs-vpn");
+        let app_exe = temp.path().join("PMACS VPN.app/Contents/MacOS/pmacs-vpn");
+        std::fs::create_dir_all(app_exe.parent().expect("app exe parent")).expect("mkdir app");
+        std::fs::write(&cli_exe, b"same pmacs vpn build").expect("write cli");
+        std::fs::write(&app_exe, b"same pmacs vpn build").expect("write app");
+
+        let home_dir = PathBuf::from("/Users/tester");
+        let installed = generate_daemon_plist(&app_exe, &home_dir)
+            .replace(TRIGGER_FILE, "/tmp/pmacs-vpn-wrong-trigger");
+
+        assert!(!plist_content_is_current(&installed, &cli_exe, &home_dir));
     }
 
     #[test]

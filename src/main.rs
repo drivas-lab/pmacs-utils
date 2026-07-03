@@ -511,6 +511,10 @@ enum PromptMode {
 
 const AUTH_PRELOGIN_TIMEOUT: Duration = Duration::from_secs(45);
 const AUTH_LOGIN_TIMEOUT: Duration = Duration::from_secs(180);
+const ROUTE_HEALTH_PORT: u16 = 22;
+const ROUTE_HEALTH_INTERVAL: Duration = Duration::from_secs(10);
+const ROUTE_HEALTH_PROBE_TIMEOUT: Duration = Duration::from_secs(3);
+const ROUTE_HEALTH_FAILURE_THRESHOLD: u32 = 6;
 
 #[derive(Copy, Clone, Debug, PartialEq)]
 enum AuthStep {
@@ -556,6 +560,145 @@ where
         Ok(Ok(value)) => Ok(value),
         Ok(Err(e)) => Err(AuthStepError::Inner(e)),
         Err(_) => Err(AuthStepError::TimedOut(step)),
+    }
+}
+
+#[derive(Clone, Debug)]
+struct RouteHealthTarget {
+    label: String,
+    addr: std::net::SocketAddr,
+}
+
+impl RouteHealthTarget {
+    fn new(label: String, addr: std::net::SocketAddr) -> Self {
+        Self { label, addr }
+    }
+}
+
+#[derive(Debug)]
+struct RouteHealthError {
+    label: String,
+    addr: std::net::SocketAddr,
+    failures: u32,
+}
+
+impl RouteHealthError {
+    fn new(target: &RouteHealthTarget, failures: u32) -> Self {
+        Self {
+            label: target.label.clone(),
+            addr: target.addr,
+            failures,
+        }
+    }
+
+    #[cfg(test)]
+    fn label(&self) -> &str {
+        &self.label
+    }
+
+    #[cfg(test)]
+    fn failures(&self) -> u32 {
+        self.failures
+    }
+}
+
+impl std::fmt::Display for RouteHealthError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "VPN route health check failed for {} at {} after {} consecutive failures",
+            self.label, self.addr, self.failures
+        )
+    }
+}
+
+impl std::error::Error for RouteHealthError {}
+
+fn route_health_targets(
+    hosts_map: &std::collections::HashMap<String, std::net::IpAddr>,
+) -> Vec<RouteHealthTarget> {
+    let mut targets: Vec<_> = hosts_map
+        .iter()
+        .map(|(host, ip)| {
+            RouteHealthTarget::new(
+                host.clone(),
+                std::net::SocketAddr::new(*ip, ROUTE_HEALTH_PORT),
+            )
+        })
+        .collect();
+    targets.sort_by(|a, b| a.label.cmp(&b.label));
+    targets
+}
+
+async fn route_health_probe(target: &RouteHealthTarget, timeout: Duration) -> bool {
+    use tokio::io::AsyncReadExt;
+
+    let probe = async {
+        let mut stream = tokio::net::TcpStream::connect(target.addr).await.ok()?;
+        let mut banner = Vec::with_capacity(64);
+        let mut byte = [0_u8; 1];
+        let mut saw_newline = false;
+
+        while banner.len() < 255 {
+            match stream.read(&mut byte).await {
+                Ok(0) => return None,
+                Ok(_) => {
+                    banner.push(byte[0]);
+                    if byte[0] == b'\n' {
+                        saw_newline = true;
+                        break;
+                    }
+                }
+                Err(_) => return None,
+            }
+        }
+
+        Some(saw_newline && banner.starts_with(b"SSH-"))
+    };
+
+    matches!(tokio::time::timeout(timeout, probe).await, Ok(Some(true)))
+}
+
+async fn route_health_monitor(
+    targets: Vec<RouteHealthTarget>,
+    interval: Duration,
+    probe_timeout: Duration,
+    failure_threshold: u32,
+) -> Result<(), RouteHealthError> {
+    if targets.is_empty() {
+        return std::future::pending().await;
+    }
+
+    let failure_threshold = failure_threshold.max(1);
+    let mut failures = vec![0_u32; targets.len()];
+    let mut ticker = tokio::time::interval(interval);
+    ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+
+    loop {
+        ticker.tick().await;
+
+        for (idx, target) in targets.iter().enumerate() {
+            if route_health_probe(target, probe_timeout).await {
+                if failures[idx] > 0 {
+                    info!(
+                        "VPN route health recovered for {} at {}",
+                        target.label, target.addr
+                    );
+                }
+                failures[idx] = 0;
+                continue;
+            }
+
+            failures[idx] += 1;
+            warn!(
+                "VPN route health probe failed for {} at {} ({}/{})",
+                target.label, target.addr, failures[idx], failure_threshold
+            );
+
+            if failures[idx] >= failure_threshold {
+                return Err(RouteHealthError::new(target, failures[idx]));
+            }
+        }
     }
 }
 
@@ -2163,6 +2306,7 @@ async fn connect_vpn_with_token(token: AuthToken) -> Result<(), Box<dyn std::err
     // Update hosts file
     let hosts_mgr = HostsManager::new();
     hosts_mgr.add_entries(&hosts_map)?;
+    let route_health_targets = route_health_targets(&hosts_map);
 
     // Save state with PID
     state.set_pid(std::process::id());
@@ -2182,6 +2326,12 @@ async fn connect_vpn_with_token(token: AuthToken) -> Result<(), Box<dyn std::err
             warn!("IPC server error: {}", e);
         }
     });
+    let route_health_handle = tokio::spawn(route_health_monitor(
+        route_health_targets,
+        ROUTE_HEALTH_INTERVAL,
+        ROUTE_HEALTH_PROBE_TIMEOUT,
+        ROUTE_HEALTH_FAILURE_THRESHOLD,
+    ));
 
     info!("Daemon: VPN ready, IPC server listening");
 
@@ -2194,6 +2344,13 @@ async fn connect_vpn_with_token(token: AuthToken) -> Result<(), Box<dyn std::err
 
             tokio::select! {
                 result = tunnel_handle => {
+                    match result {
+                        Ok(Ok(())) => Ok(()),
+                        Ok(Err(e)) => Err(Box::new(e) as Box<dyn std::error::Error>),
+                        Err(e) => Err(Box::new(e) as Box<dyn std::error::Error>),
+                    }
+                }
+                result = route_health_handle => {
                     match result {
                         Ok(Ok(())) => Ok(()),
                         Ok(Err(e)) => Err(Box::new(e) as Box<dyn std::error::Error>),
@@ -2222,6 +2379,13 @@ async fn connect_vpn_with_token(token: AuthToken) -> Result<(), Box<dyn std::err
         {
             tokio::select! {
                 result = tunnel_handle => {
+                    match result {
+                        Ok(Ok(())) => Ok(()),
+                        Ok(Err(e)) => Err(Box::new(e) as Box<dyn std::error::Error>),
+                        Err(e) => Err(Box::new(e) as Box<dyn std::error::Error>),
+                    }
+                }
+                result = route_health_handle => {
                     match result {
                         Ok(Ok(())) => Ok(()),
                         Ok(Err(e)) => Err(Box::new(e) as Box<dyn std::error::Error>),
@@ -2481,6 +2645,75 @@ mod tests {
             err.to_string(),
             "Timed out contacting PMACS before DUO push was requested"
         );
+    }
+
+    #[tokio::test]
+    async fn route_health_monitor_fails_after_consecutive_probe_failures() {
+        let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+            .await
+            .expect("test should reserve a local port");
+        let addr = listener
+            .local_addr()
+            .expect("test listener should have an address");
+        drop(listener);
+
+        let err = route_health_monitor(
+            vec![RouteHealthTarget::new("test-route".to_string(), addr)],
+            std::time::Duration::from_millis(1),
+            std::time::Duration::from_millis(20),
+            2,
+        )
+        .await
+        .expect_err("closed local port should become unhealthy");
+
+        assert_eq!(err.label(), "test-route");
+        assert_eq!(err.failures(), 2);
+    }
+
+    #[tokio::test]
+    async fn route_health_probe_requires_ssh_banner_after_tcp_connect() {
+        let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+            .await
+            .expect("test should reserve a local port");
+        let addr = listener
+            .local_addr()
+            .expect("test listener should have an address");
+        let server = tokio::spawn(async move {
+            let (socket, _peer) = listener.accept().await.expect("accept probe");
+            let _socket = socket;
+            tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+        });
+
+        let target = RouteHealthTarget::new("test-route".to_string(), addr);
+        assert!(
+            !route_health_probe(&target, std::time::Duration::from_millis(20)).await,
+            "TCP connect without an SSH banner is not a usable route"
+        );
+
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn route_health_probe_accepts_ssh_banner() {
+        use tokio::io::AsyncWriteExt;
+
+        let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+            .await
+            .expect("test should reserve a local port");
+        let addr = listener
+            .local_addr()
+            .expect("test listener should have an address");
+        let server = tokio::spawn(async move {
+            let (mut socket, _peer) = listener.accept().await.expect("accept probe");
+            socket
+                .write_all(b"SSH-2.0-test-server\r\n")
+                .await
+                .expect("write banner");
+        });
+
+        let target = RouteHealthTarget::new("test-route".to_string(), addr);
+        assert!(route_health_probe(&target, std::time::Duration::from_millis(200)).await);
+        server.await.expect("server task should finish");
     }
 
     // -- Acceptance tests: tray adoption of externally-established sessions --
