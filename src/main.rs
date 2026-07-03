@@ -669,12 +669,27 @@ fn run_tray_diagnostics() {
     }
 }
 
-async fn initialize_tray_status(status_tx: &std::sync::mpsc::Sender<pmacs_vpn::tray::VpnStatus>) {
+fn startup_status_for_live_daemon(
+    phase: &PhaseTracker,
+    live_gateway: Option<String>,
+) -> Option<pmacs_vpn::tray::VpnStatus> {
     use pmacs_vpn::tray::VpnStatus;
 
+    live_gateway.map(|ip| {
+        let _ = phase.transition(&ConnectionPhase::Idle, ConnectionPhase::ObservedConnected);
+        VpnStatus::Connected { ip }
+    })
+}
+
+async fn initialize_tray_status(
+    status_tx: &std::sync::mpsc::Sender<pmacs_vpn::tray::VpnStatus>,
+    phase: &PhaseTracker,
+) {
     let ipc_client = pmacs_vpn::ipc::IpcClient::new();
-    if let Some(ip) = probe_live_daemon(&ipc_client).await {
-        let _ = status_tx.send(VpnStatus::Connected { ip });
+    if let Some(status) =
+        startup_status_for_live_daemon(phase, probe_live_daemon(&ipc_client).await)
+    {
+        let _ = status_tx.send(status);
     }
 }
 
@@ -1117,6 +1132,7 @@ fn start_tray_services(
 ) -> (
     pmacs_vpn::tray::TrayApp,
     std::sync::mpsc::Sender<pmacs_vpn::tray::VpnStatus>,
+    PhaseTracker,
 ) {
     use pmacs_vpn::tray::TrayApp;
 
@@ -1133,9 +1149,9 @@ fn start_tray_services(
 
     let phase = PhaseTracker::new();
     spawn_tray_command_handler(rt.clone(), command_rx, status_tx.clone(), phase.clone());
-    spawn_tray_health_monitor(rt, status_tx.clone(), command_tx, phase);
+    spawn_tray_health_monitor(rt, status_tx.clone(), command_tx, phase.clone());
 
-    (app, status_tx)
+    (app, status_tx, phase)
 }
 
 /// Run the VPN with system tray GUI.
@@ -1157,8 +1173,8 @@ async fn run_tray_mode(launched_at_login: bool) {
 
     let rt = tokio::runtime::Handle::current();
     let launched_at_login = is_login_autostart_launch(launched_at_login);
-    let (app, status_tx) = start_tray_services(&rt, launched_at_login);
-    initialize_tray_status(&status_tx).await;
+    let (app, status_tx, phase) = start_tray_services(&rt, launched_at_login);
+    initialize_tray_status(&status_tx, &phase).await;
 
     #[cfg(target_os = "macos")]
     {
@@ -2421,6 +2437,25 @@ mod tests {
         assert_eq!(
             monitor_action(&phase.get(), None),
             MonitorAction::MarkDisconnected
+        );
+    }
+
+    #[test]
+    fn acceptance_startup_live_daemon_marks_phase_observed_before_connect_commands() {
+        // BREAKS IF: tray startup paints an existing daemon as connected but
+        // leaves the controller phase Idle, so a Connect click starts a new
+        // auth/elevation flow despite the green status icon.
+        let phase = PhaseTracker::new();
+        let gateway = "198.51.100.8".to_string();
+
+        assert_eq!(
+            startup_status_for_live_daemon(&phase, Some(gateway.clone())),
+            Some(pmacs_vpn::tray::VpnStatus::Connected { ip: gateway })
+        );
+        assert_eq!(phase.get(), ConnectionPhase::ObservedConnected);
+        assert!(
+            !phase.transition(&ConnectionPhase::Idle, ConnectionPhase::Connecting),
+            "Connect must be ignored while a live daemon is already observed"
         );
     }
 
