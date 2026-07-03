@@ -1,10 +1,9 @@
-//! Acceptance tests for the throughput/wedge-detection hardening
-//! (outbound packet batching, bounded mid-frame reads) added on top of
-//! the GlobalProtect SSL tunnel, exercised from outside the crate
-//! boundary through the public `pmacs_vpn::gp` API.
+//! Acceptance tests for the tunnel hardening added on top of the
+//! GlobalProtect SSL tunnel, exercised from outside the crate boundary
+//! through the public `pmacs_vpn::gp` API.
 //!
-//! Socket-buffer tuning, the wedge detector, and the outbound-batching
-//! loop itself are private to `src/gp/tunnel.rs` and are covered by
+//! Socket-buffer tuning and the wedge detector are private to
+//! `src/gp/tunnel.rs` and are covered by
 //! acceptance-style tests added inside that module's own `#[cfg(test)]`
 //! block instead (Rust privacy puts them out of reach here). Likewise
 //! ESP-offer observability lives in `src/gp/auth.rs`'s own test module.
@@ -12,10 +11,10 @@
 //! Run with: cargo test --test tunnel_hardening_acceptance -- --test-threads=1
 
 // ============================================================================
-// Outbound batching: wire format must stay a valid, ordered GP-frame stream
+// GP frame streams: concatenated frames must stay valid and ordered
 // ============================================================================
 
-mod outbound_batching {
+mod outbound_frame_streams {
     use pmacs_vpn::gp::GpPacket;
 
     // BREAKS IF: coalescing several queued TUN packets into one TLS write
@@ -31,9 +30,8 @@ mod outbound_batching {
             GpPacket::ipv4(vec![0x45, 0xff]),
         ];
 
-        // Mirrors SslTunnel::run's batching loop: one shared buffer, every
-        // queued packet's frame appended to it, then (conceptually) written
-        // to the gateway stream in a single write_all.
+        // Several GP frames can appear back-to-back on the gateway stream,
+        // whether from historical batching or future writer buffering.
         let mut wire = Vec::new();
         for p in &packets {
             p.encode_into(&mut wire);
@@ -48,7 +46,7 @@ mod outbound_batching {
             assert_eq!(
                 &decoded, expected,
                 "frame {i} at offset {offset} does not match the packet queued at this position \
-                 (reordered or corrupted by batching)"
+                 (reordered or corrupted in a concatenated frame stream)"
             );
             offset += decoded.encode().len();
         }
@@ -59,10 +57,9 @@ mod outbound_batching {
         );
     }
 
-    // BREAKS IF: a burst near the real batch cap (SslTunnel's
-    // MAX_BATCH_PACKETS = 64) reorders, drops, or merges frames -
-    // corruption that would only show up under load, not in a two-packet
-    // smoke test.
+    // BREAKS IF: a long concatenated frame stream reorders, drops, or
+    // merges frames - corruption that would only show up under load, not
+    // in a two-packet smoke test.
     #[test]
     fn a_full_size_batch_of_64_packets_preserves_order_and_content() {
         let mut packets = Vec::new();
@@ -83,17 +80,16 @@ mod outbound_batching {
                 .unwrap_or_else(|e| panic!("packet {i} failed to decode: {e}"));
             assert_eq!(
                 decoded.payload, expected.payload,
-                "packet {i} payload does not match: batch corrupted or reordered"
+                "packet {i} payload does not match: frame stream corrupted or reordered"
             );
             offset += decoded.encode().len();
         }
         assert_eq!(offset, wire.len());
     }
 
-    // BREAKS IF: batching changes the on-wire framing so a batched frame
-    // disagrees byte-for-byte with the single-packet format (magic,
-    // length, or type byte drift), breaking a gateway that expects
-    // identical framing regardless of how frames were grouped for sending.
+    // BREAKS IF: appending into an existing frame buffer changes the
+    // on-wire framing so a frame disagrees byte-for-byte with the
+    // single-packet format (magic, length, or type byte drift).
     #[test]
     fn batched_frame_bytes_are_byte_identical_to_a_standalone_encode() {
         let a = GpPacket::ipv4(vec![0x45, 0x01, 0x02, 0x03]);
@@ -109,12 +105,12 @@ mod outbound_batching {
         assert_eq!(
             &batched[..standalone_a.len()],
             &standalone_a[..],
-            "first frame's bytes changed when batched vs. sent alone"
+            "first frame's bytes changed when appended vs. sent alone"
         );
         assert_eq!(
             &batched[standalone_a.len()..],
             &standalone_b[..],
-            "second frame's bytes changed when batched vs. sent alone"
+            "second frame's bytes changed when appended vs. sent alone"
         );
 
         // Explicit framing check per the wire spec: magic 0x1a2b3c4d,
@@ -122,16 +118,40 @@ mod outbound_batching {
         assert_eq!(
             &batched[0..4],
             &[0x1a, 0x2b, 0x3c, 0x4d],
-            "magic must be unchanged by batching"
+            "magic must be unchanged when appending frames"
         );
         assert_eq!(
             &batched[6..8],
             &4u16.to_be_bytes(),
-            "length field must be big-endian and unaffected by batching"
+            "length field must be big-endian and unaffected by appending"
         );
         assert_eq!(
             batched[8], 0x01,
-            "data type byte must still be 0x01 after batching"
+            "data type byte must still be 0x01 after appending"
+        );
+    }
+}
+
+// ============================================================================
+// TUN polling: each outbound read must use Tokio's real waker
+// ============================================================================
+
+mod tun_polling {
+    // BREAKS IF: the tunnel loop starts polling an extra TUN read with
+    // Waker::noop again. That can register a no-op waker with the async
+    // TUN fd, stranding follow-up packets such as the final ACK in a TCP
+    // handshake: local connect() appears to succeed, but the remote SSH
+    // server never gets far enough to send its banner.
+    #[test]
+    fn tunnel_loop_does_not_poll_tun_reads_with_noop_waker() {
+        let src = include_str!("../src/gp/tunnel.rs");
+        assert!(
+            !src.contains("Waker::noop"),
+            "the TUN read loop must not register a no-op waker"
+        );
+        assert!(
+            !src.contains("poll_immediate(self.tun.read"),
+            "the TUN read loop must not opportunistically poll extra reads"
         );
     }
 }

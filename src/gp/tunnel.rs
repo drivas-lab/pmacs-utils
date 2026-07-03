@@ -56,9 +56,6 @@ const SESSION_WARNING_SECS: u64 = 15 * 60 * 60; // Warn at 15 hours
 /// defaults (a few hundred KB) cap a 200ms-RTT tunnel near 1 MB/s.
 const SOCKET_BUFFER_BYTES: usize = 4 * 1024 * 1024;
 
-/// Maximum outbound TUN packets coalesced into a single TLS write.
-const MAX_BATCH_PACKETS: usize = 64;
-
 /// Smoothed-RTT level (ms) treated as a degradation strike.
 const WEDGE_RTT_THRESHOLD_MS: u32 = 2000;
 
@@ -355,7 +352,7 @@ impl SslTunnel {
 
         // Pre-allocate buffers outside the loop to avoid repeated allocation
         let mut tun_buf = vec![0u8; mtu + 128];
-        let mut out_buf: Vec<u8> = Vec::with_capacity((mtu + 144) * MAX_BATCH_PACKETS);
+        let mut out_buf: Vec<u8> = Vec::with_capacity(mtu + 144);
 
         // Persistent header buffer for cancel-safe reads
         // (read_exact in select! is not cancel-safe - partial reads would be lost)
@@ -366,32 +363,15 @@ impl SslTunnel {
             tokio::select! {
                 // Priority 1: Outbound traffic (TUN → Gateway)
                 // Packets from applications destined for VPN network.
-                // Already-queued packets are drained into the same buffer so a
-                // burst costs one TLS write instead of one record per packet.
+                // Each read is awaited with Tokio's real waker. Do not poll
+                // extra TUN reads with a no-op waker here: that can strand
+                // follow-up packets such as the final ACK of a TCP handshake.
                 result = self.tun.read(&mut tun_buf) => {
                     match result {
                         Ok(n) if n > 0 => {
                             debug!("TUN read {} bytes (outbound)", n);
                             out_buf.clear();
                             encode_ip_packet(&tun_buf[..n], &mut out_buf)?;
-                            let mut batched = 1usize;
-                            while batched < MAX_BATCH_PACKETS {
-                                match poll_immediate(self.tun.read(&mut tun_buf)) {
-                                    Some(Ok(n)) if n > 0 => {
-                                        encode_ip_packet(&tun_buf[..n], &mut out_buf)?;
-                                        batched += 1;
-                                    }
-                                    Some(Ok(_)) => break,
-                                    Some(Err(e)) => {
-                                        error!("TUN read error: {}", e);
-                                        return Err(e.into());
-                                    }
-                                    None => break,
-                                }
-                            }
-                            if batched > 1 {
-                                debug!("Coalesced {} outbound packets into one write ({} bytes)", batched, out_buf.len());
-                            }
                             self.stream.write_all(&out_buf).await?;
                             self.stream.flush().await?;
                         }
@@ -544,21 +524,6 @@ fn encode_ip_packet(packet: &[u8], out: &mut Vec<u8>) -> Result<(), TunnelError>
         .ok_or_else(|| TunnelError::SetupFailed("Invalid IP packet".to_string()))?;
     gp_packet.encode_into(out);
     Ok(())
-}
-
-/// Poll a future exactly once; Some(output) if it is already ready.
-///
-/// Used to opportunistically drain TUN packets that are queued right now.
-/// A Pending result registers only a no-op waker, which is safe here: the
-/// select! loop re-polls the TUN read with its real waker on the very next
-/// iteration, and readiness is not lost in between.
-fn poll_immediate<F: Future>(fut: F) -> Option<F::Output> {
-    let mut fut = std::pin::pin!(fut);
-    let mut cx = std::task::Context::from_waker(std::task::Waker::noop());
-    match fut.as_mut().poll(&mut cx) {
-        std::task::Poll::Ready(v) => Some(v),
-        std::task::Poll::Pending => None,
-    }
 }
 
 /// Establish the gateway data stream: TCP connect, buffer tuning, TLS
@@ -891,16 +856,14 @@ mod tests {
     }
 
     // ------------------------------------------------------------------
-    // Acceptance: outbound batching at the exact private helper the
-    // SslTunnel::run select! loop calls per queued TUN packet (criterion 2,
-    // wiring-level proxy for the public-API batching tests in
-    // tests/tunnel_hardening_acceptance.rs).
+    // Acceptance: GP frame appends remain ordered and individually
+    // decodable. The runtime tunnel loop intentionally awaits one TUN
+    // read at a time, but this helper is still allowed to append to an
+    // existing buffer for keepalives, tests, or future safe writers.
     // ------------------------------------------------------------------
 
-    // BREAKS IF: draining several queued outbound TUN reads into the
-    // shared out_buf (as SslTunnel::run does before a single
-    // stream.write_all) reorders or corrupts a frame relative to a
-    // packet sent on its own.
+    // BREAKS IF: appending several frames into the shared out_buf
+    // reorders or corrupts a frame relative to a packet sent on its own.
     #[test]
     fn acceptance_encode_ip_packet_batches_preserve_order_and_are_individually_decodable() {
         // Minimal but version-valid IPv4/IPv6 payloads (only the version
@@ -922,7 +885,7 @@ mod tests {
                 .unwrap_or_else(|e| panic!("batched packet {i} failed to decode: {e}"));
             assert_eq!(
                 decoded.payload, *raw,
-                "batched packet {i} payload does not match what was queued (reordered or corrupted)"
+                "appended packet {i} payload does not match what was queued (reordered or corrupted)"
             );
             offset += decoded.encode().len();
         }
@@ -930,8 +893,8 @@ mod tests {
     }
 
     // BREAKS IF: a malformed packet from the TUN device is silently
-    // dropped instead of surfacing an error - the batching loop must be
-    // able to detect it rather than sending a bogus frame to the gateway.
+    // dropped instead of surfacing an error rather than sending a bogus
+    // frame to the gateway.
     #[test]
     fn acceptance_encode_ip_packet_rejects_an_undecodable_ip_version() {
         let garbage = vec![0x00, 0x00, 0x00, 0x00]; // version nibble 0: neither v4 nor v6
@@ -943,7 +906,7 @@ mod tests {
         );
         assert!(
             out_buf.is_empty(),
-            "a rejected packet must not leave partial bytes in the shared batch buffer"
+            "a rejected packet must not leave partial bytes in the shared frame buffer"
         );
     }
 
