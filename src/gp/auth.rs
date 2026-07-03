@@ -514,7 +514,7 @@ pub async fn login(
             debug!("Retry login status: {}", retry_response.status());
 
             let retry_body = retry_response.text().await?;
-            debug!("Retry login body: {}", retry_body);
+            debug!("Retry login response received ({} bytes)", retry_body.len());
 
             return parse_jnlp_response(&retry_body, username, gateway);
         }
@@ -961,6 +961,33 @@ mod tests {
                      which carries session key material: {line}"
                 );
             }
+        }
+    }
+
+    #[test]
+    fn no_auth_log_line_interpolates_a_raw_response_body() {
+        // Response bodies in this module carry credentials, auth cookies, and
+        // session key material; log lines may record their length, never the
+        // bytes. Covers every function, not just getconfig_impl.
+        let src = include_str!("auth.rs");
+        for (i, line) in src.lines().enumerate() {
+            let trimmed = line.trim_start();
+            let is_log_call = ["debug!(", "info!(", "warn!(", "error!(", "trace!("]
+                .iter()
+                .any(|m| trimmed.starts_with(m));
+            if !is_log_call {
+                continue;
+            }
+            let compact = line.replace(' ', "");
+            let interpolates_body = ["body)", "retry_body)", "challenge_body)"]
+                .iter()
+                .any(|pat| compact.contains(pat));
+            assert!(
+                !interpolates_body,
+                "auth.rs:{} logs a raw response body: {}",
+                i + 1,
+                line.trim()
+            );
         }
     }
 }
