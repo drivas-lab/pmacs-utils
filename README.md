@@ -136,7 +136,7 @@ save_password = true          # store password in OS keychain
 duo_method = "push"           # push, sms, call, or passcode
 start_at_login = false        # start tray at OS login
 auto_connect = true           # auto-connect on manual tray launch (not on login auto-start)
-auto_reconnect = true         # reconnect if VPN drops unexpectedly
+auto_reconnect = false        # opt in to reconnect after drops; may trigger DUO
 max_reconnect_attempts = 3    # give up after N failed reconnects
 reconnect_delay_secs = 5      # base delay between reconnect attempts
 inbound_timeout_secs = 45     # detect dead tunnels (lower = faster detection)
