@@ -91,10 +91,10 @@ impl GpPacket {
         }
     }
 
-    /// Encode packet into wire format
-    pub fn encode(&self) -> Vec<u8> {
-        let mut frame = Vec::with_capacity(HEADER_SIZE + self.payload.len());
-
+    /// Encode packet into wire format, appending to an existing buffer
+    ///
+    /// Lets the tunnel coalesce several outbound frames into one TLS write.
+    pub fn encode_into(&self, frame: &mut Vec<u8>) {
         // Magic
         frame.extend_from_slice(&MAGIC);
 
@@ -117,7 +117,12 @@ impl GpPacket {
 
         // Payload
         frame.extend_from_slice(&self.payload);
+    }
 
+    /// Encode packet into wire format
+    pub fn encode(&self) -> Vec<u8> {
+        let mut frame = Vec::with_capacity(HEADER_SIZE + self.payload.len());
+        self.encode_into(&mut frame);
         frame
     }
 
@@ -247,6 +252,32 @@ mod tests {
         let packet = GpPacket::from_ip_packet(ipv6_payload.clone()).unwrap();
         assert_eq!(packet.ethertype, ETHERTYPE_IPV6);
         assert_eq!(packet.payload, ipv6_payload);
+    }
+
+    #[test]
+    fn test_encode_into_matches_encode() {
+        let data = GpPacket::ipv4(vec![0x45, 0x00, 0x00, 0x28, 0xde, 0xad]);
+        let mut buf = Vec::new();
+        data.encode_into(&mut buf);
+        assert_eq!(buf, data.encode());
+
+        let keepalive = GpPacket::keepalive();
+        let mut buf = Vec::new();
+        keepalive.encode_into(&mut buf);
+        assert_eq!(buf, keepalive.encode());
+    }
+
+    #[test]
+    fn test_encode_into_appends_frames_back_to_back() {
+        let first = GpPacket::ipv4(vec![0x45, 0x01, 0x02]);
+        let second = GpPacket::ipv6(vec![0x60, 0x0a, 0x0b, 0x0c]);
+        let mut buf = Vec::new();
+        first.encode_into(&mut buf);
+        second.encode_into(&mut buf);
+
+        let first_len = first.encode().len();
+        assert_eq!(GpPacket::decode(&buf[..first_len]).unwrap(), first);
+        assert_eq!(GpPacket::decode(&buf[first_len..]).unwrap(), second);
     }
 
     #[test]
