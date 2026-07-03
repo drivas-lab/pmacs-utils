@@ -673,17 +673,8 @@ async fn initialize_tray_status(status_tx: &std::sync::mpsc::Sender<pmacs_vpn::t
     use pmacs_vpn::tray::VpnStatus;
 
     let ipc_client = pmacs_vpn::ipc::IpcClient::new();
-    if let Ok(status) = ipc_client.get_status().await {
-        let _ = status_tx.send(VpnStatus::Connected { ip: status.gateway });
-        return;
-    }
-
-    if let Ok(Some(state)) = pmacs_vpn::VpnState::load()
-        && state.is_daemon_running()
-    {
-        let _ = status_tx.send(VpnStatus::Connected {
-            ip: state.gateway.to_string(),
-        });
+    if let Some(ip) = probe_live_daemon(&ipc_client).await {
+        let _ = status_tx.send(VpnStatus::Connected { ip });
     }
 }
 
@@ -873,6 +864,82 @@ fn spawn_tray_command_handler(
     });
 }
 
+/// What the tray health monitor should do after one probe of daemon liveness.
+#[derive(Debug, PartialEq)]
+enum MonitorAction {
+    /// Belief and reality agree, or a user action is in progress.
+    Stand,
+    /// A live daemon exists that the tray is not tracking — reflect it.
+    AdoptConnected(String),
+    /// The daemon the tray was tracking is gone — start recovery.
+    BeginRecovery,
+}
+
+/// Decide the monitor's move from the current phase and the probe result.
+///
+/// The tray is a viewer of VPN state, not its owner: sessions established
+/// by the CLI (or by daemons without an IPC server) must still turn the
+/// icon green, and transitional user actions must never be stomped.
+fn monitor_action(phase: &ConnectionPhase, live_gateway: Option<String>) -> MonitorAction {
+    match (phase, live_gateway) {
+        (ConnectionPhase::Idle, Some(gateway)) => MonitorAction::AdoptConnected(gateway),
+        (ConnectionPhase::Connected, None) => MonitorAction::BeginRecovery,
+        _ => MonitorAction::Stand,
+    }
+}
+
+/// Debounce for adopting externally-established sessions.
+///
+/// A daemon mid-teardown after a user disconnect can leave a stale state
+/// file for one probe cycle; adopting on a single sighting would flip the
+/// tray back to Connected and then trigger a spurious auto-reconnect.
+/// Adoption therefore requires the same gateway on two consecutive probes.
+struct AdoptionDebounce {
+    pending: Option<String>,
+}
+
+impl AdoptionDebounce {
+    fn new() -> Self {
+        Self { pending: None }
+    }
+
+    /// Record a live sighting; returns the gateway once confirmed twice in a row.
+    fn observe(&mut self, gateway: String) -> Option<String> {
+        if self.pending.as_deref() == Some(gateway.as_str()) {
+            self.pending = None;
+            Some(gateway)
+        } else {
+            self.pending = Some(gateway);
+            None
+        }
+    }
+
+    /// Forget any pending sighting (called when the probe or phase disagrees).
+    fn reset(&mut self) {
+        self.pending = None;
+    }
+}
+
+/// Find a live daemon by any available signal.
+///
+/// The IPC server is the primary channel, but daemons predating it (or a
+/// transiently unavailable socket) still leave an authoritative state file;
+/// treating IPC as the only truth makes the tray blind to real sessions
+/// and, worse, lets the health monitor "recover" a healthy one.
+async fn probe_live_daemon(ipc_client: &pmacs_vpn::ipc::IpcClient) -> Option<String> {
+    if let Ok(status) = ipc_client.get_status().await {
+        return Some(status.gateway);
+    }
+
+    if let Ok(Some(state)) = pmacs_vpn::VpnState::load()
+        && state.is_daemon_running()
+    {
+        return Some(state.gateway.to_string());
+    }
+
+    None
+}
+
 fn spawn_tray_health_monitor(
     rt: &tokio::runtime::Handle,
     status_tx: std::sync::mpsc::Sender<pmacs_vpn::tray::VpnStatus>,
@@ -884,18 +951,30 @@ fn spawn_tray_health_monitor(
     let rt = rt.clone();
     rt.spawn(async move {
         let ipc_client = pmacs_vpn::ipc::IpcClient::new();
+        let mut adoption = AdoptionDebounce::new();
 
         loop {
             tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
 
-            // Only act when we believe we're Connected
-            if phase.get() != ConnectionPhase::Connected {
-                continue;
-            }
-
-            let daemon_alive = ipc_client.ping().await.is_ok();
-            if daemon_alive {
-                continue;
+            let live = probe_live_daemon(&ipc_client).await;
+            match monitor_action(&phase.get(), live) {
+                MonitorAction::Stand => {
+                    adoption.reset();
+                    continue;
+                }
+                MonitorAction::AdoptConnected(ip) => {
+                    if let Some(ip) = adoption.observe(ip) {
+                        // CAS so a user action starting between probe and now wins.
+                        if phase.transition(&ConnectionPhase::Idle, ConnectionPhase::Connected) {
+                            info!("Adopted externally-established VPN session (gateway {})", ip);
+                            let _ = status_tx.send(VpnStatus::Connected { ip });
+                        }
+                    }
+                    continue;
+                }
+                MonitorAction::BeginRecovery => {
+                    adoption.reset();
+                }
             }
 
             // Daemon died while we thought we were Connected.
@@ -2098,6 +2177,81 @@ async fn cleanup_vpn(state: &pmacs_vpn::VpnState) -> Result<(), Box<dyn std::err
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn monitor_adopts_an_externally_established_session_when_idle() {
+        // A session created by the CLI (or an older daemon without an IPC
+        // server) must turn the tray green; the tray is a viewer of VPN
+        // state, not the owner of it.
+        assert_eq!(
+            monitor_action(&ConnectionPhase::Idle, Some("10.0.0.1".to_string())),
+            MonitorAction::AdoptConnected("10.0.0.1".to_string())
+        );
+    }
+
+    #[test]
+    fn monitor_begins_recovery_when_a_tracked_daemon_disappears() {
+        assert_eq!(
+            monitor_action(&ConnectionPhase::Connected, None),
+            MonitorAction::BeginRecovery
+        );
+    }
+
+    #[test]
+    fn monitor_stands_still_when_state_and_belief_agree() {
+        assert_eq!(
+            monitor_action(&ConnectionPhase::Connected, Some("10.0.0.1".to_string())),
+            MonitorAction::Stand
+        );
+        assert_eq!(
+            monitor_action(&ConnectionPhase::Idle, None),
+            MonitorAction::Stand
+        );
+    }
+
+    #[test]
+    fn monitor_never_interferes_with_user_actions_in_progress() {
+        for phase in [
+            ConnectionPhase::Connecting,
+            ConnectionPhase::Disconnecting,
+            ConnectionPhase::Reconnecting { attempt: 1 },
+        ] {
+            assert_eq!(
+                monitor_action(&phase, Some("10.0.0.1".to_string())),
+                MonitorAction::Stand
+            );
+            assert_eq!(monitor_action(&phase, None), MonitorAction::Stand);
+        }
+    }
+
+    #[test]
+    fn adoption_waits_for_two_consecutive_sightings_of_the_same_gateway() {
+        let mut debounce = AdoptionDebounce::new();
+        assert_eq!(debounce.observe("10.0.0.1".to_string()), None);
+        assert_eq!(
+            debounce.observe("10.0.0.1".to_string()),
+            Some("10.0.0.1".to_string())
+        );
+    }
+
+    #[test]
+    fn adoption_debounce_restarts_when_the_gateway_changes() {
+        let mut debounce = AdoptionDebounce::new();
+        assert_eq!(debounce.observe("10.0.0.1".to_string()), None);
+        assert_eq!(debounce.observe("10.0.0.2".to_string()), None);
+        assert_eq!(
+            debounce.observe("10.0.0.2".to_string()),
+            Some("10.0.0.2".to_string())
+        );
+    }
+
+    #[test]
+    fn adoption_debounce_restarts_after_reset() {
+        let mut debounce = AdoptionDebounce::new();
+        assert_eq!(debounce.observe("10.0.0.1".to_string()), None);
+        debounce.reset();
+        assert_eq!(debounce.observe("10.0.0.1".to_string()), None);
+    }
 
     #[test]
     fn daemon_log_file_opens_under_a_writable_home() {
